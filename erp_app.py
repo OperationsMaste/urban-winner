@@ -154,12 +154,11 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 # service_account_key = """{...json content...}"""
 # spreadsheet_name = "FestiveEventERP_DB"
 
-try:
-    # Attempt to load gspread client if secrets are available
-    _gspread_enabled = False
-    _client = None
-    _spreadsheet = None
+_gspread_enabled = False
+_client = None
+_spreadsheet = None
 
+try:
     if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
         _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
         _scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -182,8 +181,8 @@ class GoogleSheetDB:
     """
     def __init__(self, spreadsheet_name, client=None, gspread_enabled=False):
         self._spreadsheet_name = spreadsheet_name
-        self._client = client
-        self._gspread_enabled = gspread_enabled
+        self._client = client # The gspread client object (can be None in mock mode)
+        self._gspread_enabled = gspread_enabled # Current state of GSheets connectivity
         self._sheets_cache = {} # Simple in-memory cache for loaded sheets
         self.mock_data = {} # For mock mode
 
@@ -201,6 +200,20 @@ class GoogleSheetDB:
             # Populate mock data with initial data for demo (same as previous in-memory)
             self._populate_mock_data()
 
+    # --- Implement __hash__ and __eq__ to make instances hashable for Streamlit's cache ---
+    def __hash__(self):
+        # The hash should reflect the state that affects the cached function's output.
+        # We hash based on spreadsheet_name and _gspread_enabled.
+        # This means if _gspread_enabled changes (e.g., due to an error and fallback),
+        # the hash changes, invalidating previous cached results for this instance.
+        return hash((self._spreadsheet_name, self._gspread_enabled))
+
+    def __eq__(self, other):
+        if not isinstance(other, GoogleSheetDB):
+            return NotImplemented
+        return self._spreadsheet_name == other._spreadsheet_name and \
+               self._gspread_enabled == other._gspread_enabled
+    # ----------------------------------------------------------------------------------
 
     def _populate_mock_data(self):
         # Users
@@ -256,11 +269,14 @@ class GoogleSheetDB:
         ])
 
     @st.cache_data(ttl=300) # Cache sheet data for 5 minutes
-    def _read_sheet_cached(_self, sheet_name):
+    def _read_sheet_cached(self, sheet_name):
         """Helper to read a sheet with caching."""
-        st.info(f"Loading data for '{sheet_name}' from {'Google Sheets' if _self._gspread_enabled else 'in-memory mock'}...")
-        if _self._gspread_enabled:
+        st.info(f"Loading data for '{sheet_name}' from {'Google Sheets' if self._gspread_enabled else 'in-memory mock'}...")
+        if self._gspread_enabled:
             try:
+                # Use the globally authorized _spreadsheet object
+                if _spreadsheet is None: # Defensive check
+                    raise ValueError("Google Sheets client not initialized.")
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 data = worksheet.get_all_records()
                 df = pd.DataFrame(data)
@@ -272,20 +288,24 @@ class GoogleSheetDB:
                 return df
             except Exception as e:
                 st.error(f"Failed to read sheet '{sheet_name}' from Google Sheets: {e}")
-                st.warning("Falling back to in-memory mock data.")
-                _self._gspread_enabled = False # Temporarily disable gspread
-                return _self.mock_data.get(sheet_name, pd.DataFrame()) # Fallback to mock if gspread fails
+                st.warning("Falling back to in-memory mock data for this operation. Disabling Google Sheets for this session.")
+                self._gspread_enabled = False # Propagate failure to instance state
+                st.rerun() # Rerun to re-evaluate based on new _gspread_enabled state
+                return self.mock_data.get(sheet_name, pd.DataFrame()) # Fallback to mock if gspread fails
         else:
-            return _self.mock_data.get(sheet_name, pd.DataFrame())
+            return self.mock_data.get(sheet_name, pd.DataFrame())
 
     def read_sheet(self, sheet_name):
         """Reads data from a specified worksheet, using cache."""
-        return self._read_sheet_cached(self, sheet_name)
+        return self._read_sheet_cached(sheet_name)
 
     def _write_sheet(self, sheet_name, df):
         """Helper to write data to a sheet (no caching)."""
         if self._gspread_enabled:
             try:
+                # Use the globally authorized _spreadsheet object
+                if _spreadsheet is None: # Defensive check
+                    raise ValueError("Google Sheets client not initialized.")
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 worksheet.clear() # Clear existing content
                 # Convert datetime.date objects to string for gspread
@@ -297,9 +317,10 @@ class GoogleSheetDB:
                 st.success(f"Data for '{sheet_name}' written to Google Sheets. 💾")
             except Exception as e:
                 st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
-                st.warning("Data saved to in-memory mock only.")
-                self._gspread_enabled = False # Temporarily disable gspread
-            
+                st.warning("Data saved to in-memory mock only. Disabling Google Sheets for this session.")
+                self._gspread_enabled = False # Propagate failure to instance state
+                st.rerun() # Rerun to re-evaluate based on new _gspread_enabled state
+        
         self.mock_data[sheet_name] = df # Update mock data regardless
         st.cache_data.clear() # Clear cache for all sheets after a write
         # st.rerun() # Re-run app to reflect changes immediately (careful with too many reruns)
@@ -396,8 +417,8 @@ def send_email(recipient_email, subject, body):
                 server.starttls()
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, recipient_email, msg.as_string())
-        st.success(f'Email notification "{subject}" sent to {recipient_email}. 📧') # CORRECTED LINE
-        print(f"--- EMAIL SENT TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END EMAIL ---") # Still print for console log
+        st.success(f'Email notification "{subject}" sent to {recipient_email}. 📧') 
+        print(f"--- EMAIL SENT TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END EMAIL ---") 
     except Exception as e:
         st.error(f"Failed to send email to {recipient_email}: {e}")
         st.warning(f"Email notification '{subject}' failed for {recipient_email}. 📧 (See console for details)")

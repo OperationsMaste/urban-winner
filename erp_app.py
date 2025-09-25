@@ -509,14 +509,14 @@ def show_admin_dashboard():
     if upcoming.empty:
         st.info("No upcoming events.")
     else:
-        st.dataframe(upcoming.head(5), use_container_width=True)
+        st.dataframe(upcoming.head(5), use_column_width=True)
 
     st.subheader("Recent Registrations 🧑‍🤝‍🧑")
     recent_regs = st.session_state.registrations_df.sort_values("Registration Date", ascending=False).head(5)
     if recent_regs.empty:
         st.info("No recent registrations.")
     else:
-        st.dataframe(recent_regs, use_container_width=True)
+        st.dataframe(recent_regs, use_column_width=True)
 
     st.subheader("Recent Announcements 📣")
     recent_announcements = st.session_state.announcements_df.sort_values("Date Posted", ascending=False).head(3)
@@ -542,7 +542,7 @@ def show_user_management():
         editable_users_df = st.data_editor(
             st.session_state.users_df.drop(columns=["Password"]),
             key="users_editor", 
-            use_container_width=True,
+            use_column_width=True,
             column_config={
                 "Role": st.column_config.SelectboxColumn(options=["Admin", "Coordinator", "Participant", "Volunteer"]),
                 "Availability": st.column_config.SelectboxColumn(options=["Available", "Busy", "On Leave", "N/A"])
@@ -617,7 +617,7 @@ def show_event_management():
             editable_events_df = st.data_editor(
                 st.session_state.events_df, 
                 key="events_editor", 
-                use_container_width=True,
+                use_column_width=True,
                 column_config={
                     "Description": st.column_config.Column(width="medium"),
                     "Budget": st.column_config.NumberColumn(format="₹%,.2f"),
@@ -690,7 +690,7 @@ def show_sponsor_management():
             editable_sponsors_df = st.data_editor(
                 st.session_state.sponsors_df, 
                 key="sponsors_editor", 
-                use_container_width=True,
+                use_column_width=True,
                 column_config={
                     "Contribution Amount": st.column_config.NumberColumn(format="₹%,.2f"),
                     "Date Added": st.column_config.DateColumn(format="YYYY/MM/DD"),
@@ -757,7 +757,7 @@ def show_budget_overview():
     if st.session_state.events_df.empty:
         st.info("No events with budget data.")
     else:
-        st.dataframe(st.session_state.events_df[["Event ID", "Name", "Budget", "Status"]], use_container_width=True)
+        st.dataframe(st.session_state.events_df[["Event ID", "Name", "Budget", "Status"]], use_column_width=True)
         st.bar_chart(st.session_state.events_df.set_index("Name")["Budget"])
 
     st.subheader("Overall Expenses (Dummy Data) 📉")
@@ -768,7 +768,7 @@ def show_budget_overview():
         "Event ID": ["E001", "E002", "E001", "E003", "E002"]
     }
     expenses = pd.DataFrame(expenses_data)
-    st.dataframe(expenses, use_container_width=True)
+    st.dataframe(expenses, use_column_width=True)
     
     total_expenses_dummy = expenses["Amount"].sum()
     st.metric("Total Expenses Recorded (Dummy)", f"₹{total_expenses_dummy:,.2f}")
@@ -790,7 +790,7 @@ def show_reports():
         else:
             participation_counts = st.session_state.registrations_df.groupby("Event ID").size().reset_index(name="Participants")
             participation_merged = pd.merge(participation_counts, st.session_state.events_df[["Event ID", "Name"]], on="Event ID", how="left")
-            st.dataframe(participation_merged.sort_values("Participants", ascending=False), use_container_width=True)
+            st.dataframe(participation_merged.sort_values("Participants", ascending=False), use_column_width=True)
             st.bar_chart(participation_merged.set_index("Name")["Participants"])
 
     elif report_type == "Budget vs Actual":
@@ -805,7 +805,7 @@ def show_reports():
         event_expenses = expenses.groupby("Event ID")["Amount"].sum().reset_index(name="Actual Expenses")
         budget_vs_actual = pd.merge(st.session_state.events_df[["Event ID", "Name", "Budget"]], event_expenses, on="Event ID", how="left").fillna(0)
         budget_vs_actual["Variance"] = budget_vs_actual["Budget"] - budget_vs_actual["Actual Expenses"]
-        st.dataframe(budget_vs_actual, use_container_width=True)
+        st.dataframe(budget_vs_actual, use_column_width=True)
         st.bar_chart(budget_vs_actual.set_index("Name")[["Budget", "Actual Expenses"]])
 
     elif report_type == "Volunteer Engagement":
@@ -815,7 +815,7 @@ def show_reports():
         else:
             volunteer_tasks_counts = st.session_state.tasks_df.groupby("Assigned To Volunteer Username").size().reset_index(name="Assigned Tasks")
             volunteer_tasks_merged = pd.merge(volunteer_tasks_counts, st.session_state.volunteers_df[["Volunteer Username", "Full Name"]], on="Volunteer Username", how="left")
-            st.dataframe(volunteer_tasks_merged, use_container_width=True)
+            st.dataframe(volunteer_tasks_merged, use_column_width=True)
             st.bar_chart(volunteer_tasks_merged.set_index("Full Name")["Assigned Tasks"])
     
     elif report_type == "Sponsor Contribution":
@@ -823,7 +823,7 @@ def show_reports():
         if st.session_state.sponsors_df.empty:
             st.info("No sponsors to report on.")
         else:
-            st.dataframe(st.session_state.sponsors_df[["Name", "Tier", "Contribution Amount", "Contact Person"]], use_container_width=True)
+            st.dataframe(st.session_state.sponsors_df[["Name", "Tier", "Contribution Amount", "Contact Person"]], use_column_width=True)
             st.bar_chart(st.session_state.sponsors_df.set_index("Name")["Contribution Amount"])
 
 
@@ -837,7 +837,7 @@ def show_my_events():
     if my_events.empty:
         st.info("You are not currently assigned to coordinate any events.")
     else:
-        st.dataframe(my_events[["Event ID", "Name", "Date", "Location", "Status"]], use_container_width=True)
+        st.dataframe(my_events[["Event ID", "Name", "Date", "Location", "Status"]], use_column_width=True)
 
         st.subheader("Update Event Status 🔄")
         with st.expander("Update Status for an Event"):
@@ -889,7 +889,7 @@ def show_event_task_management():
             editable_tasks_df = st.data_editor(
                 current_event_tasks, 
                 key=f"tasks_editor_{selected_event_id}", 
-                use_container_width=True,
+                use_column_width=True,
                 column_config={
                     "Due Date": st.column_config.DateColumn(format="YYYY/MM/DD"),
                     "Status": st.column_config.SelectboxColumn(options=["Assigned", "Pending", "In Progress", "Completed"])
@@ -966,7 +966,7 @@ def show_volunteer_assignment():
         else:
             display_tasks = pd.merge(current_event_tasks, st.session_state.volunteers_df[["Volunteer Username", "Full Name", "Availability"]],
                                      left_on="Assigned To Volunteer Username", right_on="Volunteer Username", how="left").fillna({"Full Name": "Unassigned", "Availability": "N/A"})
-            st.dataframe(display_tasks[["Description", "Full Name", "Availability", "Status", "Due Date"]], use_container_width=True)
+            st.dataframe(display_tasks[["Description", "Full Name", "Availability", "Status", "Due Date"]], use_column_width=True)
 
             st.subheader("Assign/Reassign Task to Volunteer ✏️")
             with st.expander("Assign/Reassign Task"):
@@ -1052,7 +1052,7 @@ def show_event_budget_tracking():
         if event_expenses_for_display.empty:
             st.info("No expenses recorded for this event yet (dummy data).")
         else:
-            st.dataframe(event_expenses_for_display[["Expense ID", "Category", "Amount", "Date"]], use_container_width=True)
+            st.dataframe(event_expenses_for_display[["Expense ID", "Category", "Amount", "Date"]], use_column_width=True)
 
         total_expenses = event_expenses_for_display["Amount"].sum() if not event_expenses_for_display.empty else 0
         st.metric("Total Expenses Recorded (Dummy)", f"₹{total_expenses:,.2f}")
@@ -1198,7 +1198,7 @@ def show_register_for_events():
         return
 
     events_for_display = upcoming_events[["Event ID", "Name", "Date", "Time", "Location", "Coordinator"]]
-    st.dataframe(events_for_display, use_container_width=True)
+    st.dataframe(events_for_display, use_column_width=True)
 
     st.subheader("Register for an Event ✨")
     with st.expander("Register for Selected Event"):
@@ -1254,7 +1254,7 @@ def show_my_registrations():
 
     display_regs = pd.merge(my_regs, st.session_state.events_df[["Event ID", "Name", "Date", "Location", "Status"]], on="Event ID", how="left")
     st.subheader("Your Registered Events")
-    st.dataframe(display_regs[["Name", "Date", "Location", "Status", "Registration Date"]], use_container_width=True)
+    st.dataframe(display_regs[["Name", "Date", "Location", "Status", "Registration Date"]], use_column_width=True)
 
     st.subheader("Cancel Registration ❌")
     with st.expander("Cancel an Event Registration"):
@@ -1301,7 +1301,7 @@ def show_my_tasks():
 
     display_tasks = pd.merge(my_tasks, st.session_state.events_df[["Event ID", "Name", "Date", "Location"]], on="Event ID", how="left")
     st.subheader("Your Assigned Tasks")
-    st.dataframe(display_tasks[["Name", "Date", "Location", "Description", "Due Date", "Status"]], use_container_width=True)
+    st.dataframe(display_tasks[["Name", "Date", "Location", "Description", "Due Date", "Status"]], use_column_width=True)
 
     st.subheader("Update Task Status 🔄")
     with st.expander("Update a Task's Status"):

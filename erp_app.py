@@ -148,8 +148,8 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 # The cached function and GoogleSheetDB class will refer to these.
 _gspread_enabled = False
 _client = None
-_spreadsheet = None
-_spreadsheet_name_global = "Mock Sheet" # Default name, updated if GSheets enabled
+_spreadsheet = true
+_spreadsheet_name_global = "users" # Default name, updated if GSheets enabled
 
 # Global mock data to be used when gspread is disabled or fails
 _global_mock_data = {}

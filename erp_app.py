@@ -3,20 +3,20 @@ import pandas as pd
 import datetime
 import json
 # For email (uncomment and configure if you want actual emails sent)
-# import smtplib
-# from email.mime.text import MIMEText
+import smtplib
+from email.mime.text import MIMEText
 
 # For Google Sheets (uncomment if you've set up gspread)
-# import gspread
-# from oauth2client.service_account import ServiceAccountCredentials
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+# ... (rest of your imports and configurations) ...
 
 # --- Configuration ---
 st.set_page_config(layout="wide", page_title="Inter-College Festive Event ERP")
 
 # --- Glassmorphism CSS (Injected at the start) ---
-# This CSS attempts to target common Streamlit elements for a Glassmorphism effect.
-# You may need to inspect your browser's dev tools to fine-tune selectors and properties
-# if you add more custom components or Streamlit updates its DOM structure.
+# ... (Glassmorphism CSS code) ...
 GLASSMORPHISM_CSS = """
 <style>
 /* Basic body styling */
@@ -162,9 +162,9 @@ try:
         _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
         _scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         # This block will be uncommented and used with actual gspread
-        # _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
-        # _client = gspread.authorize(_creds)
-        # _spreadsheet = _client.open(st.secrets.google_sheets.spreadsheet_name)
+        _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
+        _client = gspread.authorize(_creds)
+        _spreadsheet = _client.open(st.secrets.google_sheets.spreadsheet_name)
         _gspread_enabled = True
         st.success("Google Sheets integration enabled. ✅")
     else:
@@ -259,27 +259,21 @@ class GoogleSheetDB:
         st.info(f"Loading data for '{sheet_name}' from {'Google Sheets' if _self._gspread_enabled else 'in-memory mock'}...")
         if _self._gspread_enabled:
             # Uncomment this block for actual gspread integration
-            # try:
-            #     worksheet = _spreadsheet.worksheet(sheet_name)
-            #     data = worksheet.get_all_records()
-            #     df = pd.DataFrame(data)
-            #     # Convert specific columns to datetime.date objects where appropriate
-            #     if "Date" in df.columns:
-            #         df["Date"] = pd.to_datetime(df["Date"], errors='coerce').dt.date
-            #     if "Registration Date" in df.columns:
-            #         df["Registration Date"] = pd.to_datetime(df["Registration Date"], errors='coerce').dt.date
-            #     if "Due Date" in df.columns:
-            #         df["Due Date"] = pd.to_datetime(df["Due Date"], errors='coerce').dt.date
-            #     if "Date Posted" in df.columns:
-            #         df["Date Posted"] = pd.to_datetime(df["Date Posted"], errors='coerce').dt.date
-            #     if "Date Added" in df.columns:
-            #         df["Date Added"] = pd.to_datetime(df["Date Added"], errors='coerce').dt.date
-            #     return df
-            # except Exception as e:
-            #     st.error(f"Failed to read sheet '{sheet_name}' from Google Sheets: {e}")
-            #     st.warning("Falling back to in-memory mock data.")
-            #     _self._gspread_enabled = False # Temporarily disable gspread
-            return _self.mock_data.get(sheet_name, pd.DataFrame()) # Fallback to mock if gspread fails
+            try:
+                worksheet = _spreadsheet.worksheet(sheet_name)
+                data = worksheet.get_all_records()
+                df = pd.DataFrame(data)
+                # Convert specific columns to datetime.date objects where appropriate
+                for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
+                    if col in df.columns:
+                        # Use errors='coerce' to turn unparseable dates into NaT (Not a Time)
+                        df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                return df
+            except Exception as e:
+                st.error(f"Failed to read sheet '{sheet_name}' from Google Sheets: {e}")
+                st.warning("Falling back to in-memory mock data.")
+                _self._gspread_enabled = False # Temporarily disable gspread
+                return _self.mock_data.get(sheet_name, pd.DataFrame()) # Fallback to mock if gspread fails
         else:
             return _self.mock_data.get(sheet_name, pd.DataFrame())
 
@@ -291,20 +285,20 @@ class GoogleSheetDB:
         """Helper to write data to a sheet (no caching)."""
         if self._gspread_enabled:
             # Uncomment this block for actual gspread integration
-            # try:
-            #     worksheet = _spreadsheet.worksheet(sheet_name)
-            #     worksheet.clear() # Clear existing content
-            #     # Convert datetime.date objects to string for gspread
-            #     df_to_write = df.copy()
-            #     for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
-            #         if col in df_to_write.columns:
-            #             df_to_write[col] = df_to_write[col].astype(str)
-            #     worksheet.update([df_to_write.columns.values.tolist()] + df_to_write.values.tolist())
-            #     st.success(f"Data for '{sheet_name}' written to Google Sheets. 💾")
-            # except Exception as e:
-            #     st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
-            #     st.warning("Data saved to in-memory mock only.")
-            #     self._gspread_enabled = False # Temporarily disable gspread
+            try:
+                worksheet = _spreadsheet.worksheet(sheet_name)
+                worksheet.clear() # Clear existing content
+                # Convert datetime.date objects to string for gspread
+                df_to_write = df.copy()
+                for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
+                    if col in df_to_write.columns:
+                        df_to_write[col] = df_to_write[col].astype(str)
+                worksheet.update([df_to_write.columns.values.tolist()] + df_to_write.values.tolist())
+                st.success(f"Data for '{sheet_name}' written to Google Sheets. 💾")
+            except Exception as e:
+                st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
+                st.warning("Data saved to in-memory mock only.")
+                self._gspread_enabled = False # Temporarily disable gspread
             pass # In mock mode, we just update mock_data
         
         self.mock_data[sheet_name] = df # Update mock data regardless
@@ -318,7 +312,7 @@ class GoogleSheetDB:
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
     spreadsheet_name=st.secrets.google_sheets.spreadsheet_name if _gspread_enabled else "Mock Sheet",
-    # client=_client if _gspread_enabled else None, # Uncomment for gspread
+    client=_client if _gspread_enabled else None, # Pass _client if gspread is enabled
     gspread_enabled=_gspread_enabled
 )
 
@@ -339,7 +333,10 @@ if "users_df" not in st.session_state:
     # For initial login, recreate USERS dict from loaded data
     # In a real app, passwords should be hashed and salted!
     global USERS
-    USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
+    if "Username" in st.session_state.users_df.columns:
+        USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
+    else:
+        USERS = {} # Fallback if sheet is empty or malformed
 
 if "events_df" not in st.session_state:
     st.session_state.events_df = google_db.read_sheet("events")
@@ -396,15 +393,17 @@ def send_email(recipient_email, subject, body):
 
     try:
         # Uncomment this block for actual email sending
-        # with smtplib.SMTP(smtp_server, smtp_port) as server:
-        #     if enable_tls:
-        #         server.starttls()
-        #     server.login(sender_email, sender_password)
-        #     server.sendmail(sender_email, recipient_email, msg.as_string())
-        st.success(f"Email notification '"{subject}"' sent to {recipient_email}. 📧 (Mocked if smtplib not fully enabled)")
-        print(f"--- MOCK EMAIL TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END MOCK EMAIL ---") # Still print for console log
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            if enable_tls:
+                server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, recipient_email, msg.as_string())
+        st.success(f'Email notification "{subject}" sent to {recipient_email}. 📧') # CORRECTED LINE
+        print(f"--- EMAIL SENT TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END EMAIL ---") # Still print for console log
     except Exception as e:
         st.error(f"Failed to send email to {recipient_email}: {e}")
+        st.warning(f"Email notification '{subject}' failed for {recipient_email}. 📧 (See console for details)")
+        print(f"--- FAILED EMAIL TO: {recipient_email} ---\nSubject: {subject}\nError: {e}\n\n{body}\n--- END FAILED EMAIL ---")
 
 
 # --- Helper Functions ---

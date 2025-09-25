@@ -2,11 +2,9 @@ import streamlit as st
 import pandas as pd
 import datetime
 import json
-# For email (uncomment and configure if you want actual emails sent)
 import smtplib
 from email.mime.text import MIMEText
 
-# For Google Sheets (uncomment if you've set up gspread)
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -14,9 +12,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.set_page_config(layout="wide", page_title="Inter-College Festive Event ERP")
 
 # --- Glassmorphism CSS (Injected at the start) ---
-# This CSS attempts to target common Streamlit elements for a Glassmorphism effect.
-# You may need to inspect your browser's dev tools to fine-tune selectors and properties
-# if you add more custom components or Streamlit updates its DOM structure.
 GLASSMORPHISM_CSS = """
 <style>
 /* Basic body styling */
@@ -155,8 +150,7 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 # spreadsheet_name = "FestiveEventERP_DB"
 
 _gspread_enabled = False
-_client = None
-_spreadsheet = None
+_spreadsheet = None # _client is now only used locally within the try block
 
 try:
     if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
@@ -164,47 +158,29 @@ try:
         _scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         
         _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
-        _client = gspread.authorize(_creds)
-        _spreadsheet = _client.open(st.secrets.google_sheets.spreadsheet_name)
+        _client = gspread.authorize(_creds) # Local client instance
+        _spreadsheet = _client.open(st.secrets.google_sheets.spreadsheet_name) # Global spreadsheet object
         _gspread_enabled = True
         st.success("Google Sheets integration enabled. ✅")
     else:
-        st.warning("Google Sheets secrets not found. Running with in-memory data. Please configure `secrets.toml`.")
+        st.warning("Google Sheets secrets not found. Running with no persistent data. Please configure `secrets.toml` to enable data persistence.")
 except Exception as e:
-    st.error(f"Error initializing Google Sheets: {e}. Running with in-memory data.")
+    st.error(f"Error initializing Google Sheets: {e}. Running with no persistent data.")
     _gspread_enabled = False
 
 class GoogleSheetDB:
     """
     A class to manage interactions with Google Sheets as a database.
-    This version includes a mock mode if gspread is not configured.
+    If gspread is not enabled, it returns empty DataFrames and does not save data.
     """
-    def __init__(self, spreadsheet_name, client=None, gspread_enabled=False):
+    def __init__(self, spreadsheet_name, gspread_enabled=False):
         self._spreadsheet_name = spreadsheet_name
-        self._client = client # The gspread client object (can be None in mock mode)
         self._gspread_enabled = gspread_enabled # Current state of GSheets connectivity
-        self._sheets_cache = {} # Simple in-memory cache for loaded sheets
-        self.mock_data = {} # For mock mode
-
-        # Initialize mock data with empty dataframes mirroring structure if not enabled
-        if not self._gspread_enabled:
-            self.mock_data = {
-                "users": pd.DataFrame(columns=["Username", "Password", "Role", "Name", "Availability"]),
-                "events": pd.DataFrame(columns=["Event ID", "Name", "Date", "Time", "Location", "Coordinator", "Budget", "Status", "Description"]),
-                "registrations": pd.DataFrame(columns=["Reg ID", "Participant Username", "Event ID", "Registration Date"]),
-                "volunteers": pd.DataFrame(columns=["Volunteer Username", "Full Name", "Availability"]),
-                "tasks": pd.DataFrame(columns=["Task ID", "Event ID", "Description", "Assigned To Volunteer Username", "Due Date", "Status", "Created By"]),
-                "announcements": pd.DataFrame(columns=["Announcement ID", "Title", "Content", "Author Username", "Date Posted", "Target Role"]),
-                "sponsors": pd.DataFrame(columns=["Sponsor ID", "Name", "Contact Person", "Contact Email", "Contribution Amount", "Tier", "Date Added"])
-            }
-            # Populate mock data with initial data for demo (same as previous in-memory)
-            self._populate_mock_data()
 
     # --- Implement __hash__ and __eq__ to make instances hashable for Streamlit's cache ---
-    # These are needed for the GoogleSheetDB instance itself to be hashable IF it were passed
-    # directly to cache_data without a leading underscore. However, with `_self`,
-    # Streamlit will ignore it, but it's still good practice for object identity
-    # if you were to store GoogleSheetDB instances in hash-based collections.
+    # The hash reflects the state that affects the cached function's output.
+    # If _gspread_enabled changes (e.g., due to an error and fallback), the hash changes,
+    # invalidating previous cached results for this instance.
     def __hash__(self):
         return hash((self._spreadsheet_name, self._gspread_enabled))
 
@@ -215,99 +191,45 @@ class GoogleSheetDB:
                self._gspread_enabled == other._gspread_enabled
     # ----------------------------------------------------------------------------------
 
-    def _populate_mock_data(self):
-        # Users
-        self.mock_data["users"] = pd.DataFrame([
-            {"Username": "admin", "Password": "admin", "Role": "Admin", "Name": "Alice Admin", "Availability": "N/A"},
-            {"Username": "coord1", "Password": "coord", "Role": "Coordinator", "Name": "Bob Coordinator", "Availability": "N/A"},
-            {"Username": "part1", "Password": "part", "Role": "Participant", "Name": "Charlie Participant", "Availability": "N/A"},
-            {"Username": "volun1", "Password": "volun", "Role": "Volunteer", "Name": "Diana Volunteer", "Availability": "Available"},
-        ])
-
-        # Events
-        self.mock_data["events"] = pd.DataFrame({
-            "Event ID": ["E001", "E002", "E003"],
-            "Name": ["Tech Fest", "Cultural Gala", "Sports Day"],
-            "Date": [datetime.date(2025, 10, 15), datetime.date(2025, 11, 20), datetime.date(2025, 12, 5)],
-            "Time": ["10:00 AM", "06:00 PM", "09:00 AM"],
-            "Location": ["Auditorium A", "Amphitheater", "Main Sports Ground"],
-            "Coordinator": ["Bob Coordinator", "Bob Coordinator", "Alice Admin"],
-            "Budget": [50000, 75000, 30000],
-            "Status": ["Upcoming", "Upcoming", "Upcoming"],
-            "Description": [
-                "A showcase of the latest technologies and innovations.",
-                "An evening celebrating diverse cultural performances.",
-                "Inter-college sports competition across various disciplines."
-            ]
-        })
-
-        # Registrations
-        self.mock_data["registrations"] = pd.DataFrame([
-            {"Reg ID": "R001", "Participant Username": "part1", "Event ID": "E001", "Registration Date": datetime.date.today()}
-        ])
-
-        # Volunteers (profiles)
-        self.mock_data["volunteers"] = pd.DataFrame([
-            {"Volunteer Username": "volun1", "Full Name": "Diana Volunteer", "Availability": "Available"}
-        ])
-
-        # Tasks
-        self.mock_data["tasks"] = pd.DataFrame([
-            {"Task ID": "T001", "Event ID": "E001", "Description": "Set up registration desk", "Assigned To Volunteer Username": "volun1", "Due Date": datetime.date(2025, 10, 14), "Status": "Assigned", "Created By": "coord1"},
-            {"Task ID": "T002", "Event ID": "E001", "Description": "Guide guests to main hall", "Assigned To Volunteer Username": "volun1", "Due Date": datetime.date(2025, 10, 15), "Status": "Assigned", "Created By": "coord1"},
-        ])
-
-        # Announcements
-        self.mock_data["announcements"] = pd.DataFrame([
-            {"Announcement ID": "A001", "Title": "Welcome to the ERP!", "Content": "This is the new Inter-College Festive Event ERP. Explore its features!", "Author Username": "admin", "Date Posted": datetime.date.today(), "Target Role": "All"},
-            {"Announcement ID": "A002", "Title": "Volunteer Briefing for Tech Fest", "Content": "Mandatory briefing for all Tech Fest volunteers on Oct 10th.", "Author Username": "coord1", "Date Posted": datetime.date.today(), "Target Role": "Volunteer"},
-        ])
-
-        # Sponsors
-        self.mock_data["sponsors"] = pd.DataFrame([
-            {"Sponsor ID": "S001", "Name": "Mega Corp", "Contact Person": "John Doe", "Contact Email": "john.doe@megacorp.com", "Contribution Amount": 100000, "Tier": "Platinum", "Date Added": datetime.date.today()}
-        ])
-
     @st.cache_data(ttl=300) # Cache sheet data for 5 minutes
-    def _read_sheet_cached(_self, sheet_name): # <-- Changed 'self' to '_self' here
+    def _read_sheet_cached(_self, sheet_name): # Using _self to tell Streamlit not to hash this param
         """Helper to read a sheet with caching."""
-        st.info(f"Loading data for '{sheet_name}' from {'Google Sheets' if _self._gspread_enabled else 'in-memory mock'}...")
         if _self._gspread_enabled:
+            st.info(f"Attempting to load data for '{sheet_name}' from Google Sheets...")
             try:
-                # Use the globally authorized _spreadsheet object
-                if _spreadsheet is None: # Defensive check
-                    raise ValueError("Google Sheets client not initialized.")
+                if _spreadsheet is None: # Defensive check, should ideally be caught during init
+                    raise ValueError("Google Sheets spreadsheet object not initialized.")
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 data = worksheet.get_all_records()
                 df = pd.DataFrame(data)
+                
                 # Convert specific columns to datetime.date objects where appropriate
                 for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
                     if col in df.columns:
-                        # Use errors='coerce' to turn unparseable dates into NaT (Not a Time)
                         df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
                 return df
             except Exception as e:
                 st.error(f"Failed to read sheet '{sheet_name}' from Google Sheets: {e}")
-                st.warning("Falling back to in-memory mock data for this operation. Disabling Google Sheets for this session.")
-                _self._gspread_enabled = False # Propagate failure to instance state
-                st.rerun() # Rerun to re-evaluate based on new _gspread_enabled state
-                return _self.mock_data.get(sheet_name, pd.DataFrame()) # Fallback to mock if gspread fails
+                st.warning(f"Data for '{sheet_name}' could not be loaded. Google Sheets disabled for this session. Returning empty data.")
+                _self._gspread_enabled = False # Mark as disabled for this instance
+                st.cache_data.clear() # Clear cache to ensure subsequent reads reflect the disabled state
+                st.rerun() # Rerun to reflect the new _gspread_enabled state
+                return pd.DataFrame() # Return empty DataFrame on failure
         else:
-            return _self.mock_data.get(sheet_name, pd.DataFrame())
+            st.info(f"Google Sheets is disabled. Returning empty DataFrame for '{sheet_name}'.")
+            return pd.DataFrame() # Always return empty if disabled
 
     def read_sheet(self, sheet_name):
-        """Reads data from a specified worksheet, using cache."""
-        # When calling _read_sheet_cached, 'self' is implicitly passed as the first argument,
-        # which will be matched by '_self' in the cached function's signature.
-        return self._read_sheet_cached(sheet_name) 
+        """Reads data from a specified worksheet, using cache. If Sheets are disabled, returns empty DataFrame."""
+        return self._read_sheet_cached(sheet_name) # 'self' is implicitly passed as '_self'
 
     def _write_sheet(self, sheet_name, df):
         """Helper to write data to a sheet (no caching)."""
         if self._gspread_enabled:
+            st.info(f"Attempting to write data for '{sheet_name}' to Google Sheets...")
             try:
-                # Use the globally authorized _spreadsheet object
                 if _spreadsheet is None: # Defensive check
-                    raise ValueError("Google Sheets client not initialized.")
+                    raise ValueError("Google Sheets spreadsheet object not initialized.")
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 worksheet.clear() # Clear existing content
                 # Convert datetime.date objects to string for gspread
@@ -319,22 +241,22 @@ class GoogleSheetDB:
                 st.success(f"Data for '{sheet_name}' written to Google Sheets. 💾")
             except Exception as e:
                 st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
-                st.warning("Data saved to in-memory mock only. Disabling Google Sheets for this session.")
-                self._gspread_enabled = False # Propagate failure to instance state
-                st.rerun() # Rerun to re-evaluate based on new _gspread_enabled state
+                st.warning("Data could not be saved to Google Sheets. Google Sheets disabled for this session. Changes are not persistent.")
+                self._gspread_enabled = False # Mark as disabled for this instance
+                st.cache_data.clear() # Clear cache to ensure subsequent reads reflect the disabled state
+                st.rerun() # Rerun to reflect the new _gspread_enabled state
+        else:
+            st.warning(f"Google Sheets is disabled. Changes for '{sheet_name}' are not saved persistently.")
         
-        self.mock_data[sheet_name] = df # Update mock data regardless
-        st.cache_data.clear() # Clear cache for all sheets after a write
-        # st.rerun() # Re-run app to reflect changes immediately (careful with too many reruns)
+        st.cache_data.clear() # Clear cache for all sheets after a write (even if not saved)
 
     def save_dataframe(self, sheet_name, df):
-        """Saves a DataFrame to a worksheet."""
+        """Saves a DataFrame to a worksheet. If Sheets are disabled, warns that data is not saved."""
         self._write_sheet(sheet_name, df)
 
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
-    spreadsheet_name=st.secrets.google_sheets.spreadsheet_name if _gspread_enabled else "Mock Sheet",
-    client=_client if _gspread_enabled else None, 
+    spreadsheet_name=st.secrets.google_sheets.spreadsheet_name if _gspread_enabled else "N/A", # Pass actual name if enabled
     gspread_enabled=_gspread_enabled
 )
 
@@ -348,17 +270,18 @@ if "logged_in" not in st.session_state:
     st.session_state.user_full_name = None # Store full name for display
     st.session_state.current_page = "Home" # Default page for logged-in users or public
 
-# Load initial data from Google Sheets (or mock data)
+# Load initial data from Google Sheets (or empty DataFrames if Sheets are disabled)
 # These will be DataFrames, which are easy to work with in Streamlit
 if "users_df" not in st.session_state:
     st.session_state.users_df = google_db.read_sheet("users")
+    
     # For initial login, recreate USERS dict from loaded data
     # In a real app, passwords should be hashed and salted!
-    global USERS # Global declaration for the initial assignment at script load
-    if "Username" in st.session_state.users_df.columns:
+    global USERS 
+    if not st.session_state.users_df.empty and "Username" in st.session_state.users_df.columns:
         USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
     else:
-        USERS = {} # Fallback if sheet is empty or malformed
+        USERS = {} # Fallback to empty dict if sheet is empty or malformed
 
 if "events_df" not in st.session_state:
     st.session_state.events_df = google_db.read_sheet("events")
@@ -390,8 +313,6 @@ ROLE_PAGES = {
 
 
 # --- Email Helper Function ---
-# This function is configured with placeholders.
-# Uncomment the smtplib block and provide real credentials in .streamlit/secrets.toml
 def send_email(recipient_email, subject, body):
     """
     Sends an email notification.
@@ -467,7 +388,11 @@ def home_page():
     st.markdown("---")
     if not st.session_state.logged_in:
         st.info("Please log in using the sidebar to access specific functionalities based on your role.")
-        st.markdown("Try logging in with: `admin`/`admin`, `coord1`/`coord`, `part1`/`part`, `volun1`/`volun`")
+        # If Google Sheets are disabled and USERS is empty, prevent login attempts
+        if not USERS:
+            st.warning("No user data loaded. Please ensure Google Sheets are correctly configured and accessible to enable login.")
+        else:
+            st.markdown("Try logging in with existing users from your Google Sheet.")
     else:
         st.info(f"You are logged in as **{st.session_state.user_full_name}** ({st.session_state.role}). Use the sidebar for navigation.")
 
@@ -520,7 +445,6 @@ def show_announcements():
                         }
                         st.session_state.announcements_df = pd.concat([st.session_state.announcements_df, pd.DataFrame([new_entry])], ignore_index=True)
                         google_db.save_dataframe("announcements", st.session_state.announcements_df)
-                        st.success("Announcement published successfully! 🚀")
                         st.rerun()
                     else:
                         st.error("Please fill in both title and content for the announcement.")
@@ -572,8 +496,6 @@ def show_user_management():
     st.write("Manage system users, their roles, and basic profiles.")
 
     st.subheader("Existing System Users")
-    # USERS dict is now dynamically loaded/updated from st.session_state.users_df
-    # We will modify st.session_state.users_df directly
     
     if st.session_state.users_df.empty:
         st.info("No users in the system.")
@@ -633,7 +555,7 @@ def show_user_management():
                         new_volunteer_profile = {
                             "Volunteer Username": new_username,
                             "Full Name": new_name,
-                            "Availability": "Available"
+                            "Availability": new_user_entry["Availability"] # Use the same availability as from user entry
                         }
                         st.session_state.volunteers_df = pd.concat([st.session_state.volunteers_df, pd.DataFrame([new_volunteer_profile])], ignore_index=True)
                         google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
@@ -802,19 +724,33 @@ def show_budget_overview():
         st.dataframe(st.session_state.events_df[["Event ID", "Name", "Budget", "Status"]], use_container_width=True)
         st.bar_chart(st.session_state.events_df.set_index("Name")["Budget"])
 
-    st.subheader("Overall Expenses (Dummy Data) 📉")
-    st.warning("This section uses dummy expense data. In a real ERP, integrate with actual financial tracking.")
-    expenses_data = { # Dummy expense data
-        "Category": ["Marketing", "Venue Rental", "Artist Fees", "Equipment", "Food"],
-        "Amount": [15000, 20000, 30000, 10000, 12000],
-        "Event ID": ["E001", "E002", "E001", "E003", "E002"]
-    }
-    expenses = pd.DataFrame(expenses_data)
-    st.dataframe(expenses, use_container_width=True)
-    
-    total_expenses_dummy = expenses["Amount"].sum()
-    st.metric("Total Expenses Recorded (Dummy)", f"₹{total_expenses_dummy:,.2f}")
-    st.metric("Estimated Overall Balance", f"₹{total_allocated_budget + total_sponsor_contributions - total_expenses_dummy:,.2f}")
+    st.subheader("Overall Expenses (Conceptual) 📉")
+    st.warning("This section is conceptual. In a real ERP, integrate with actual financial tracking.")
+    if st.session_state.events_df.empty:
+        st.info("No events to track expenses for.")
+    else:
+        # Generate dummy expense data per event for visualization purposes
+        dummy_expenses = []
+        for _, event in st.session_state.events_df.iterrows():
+            # For demo, distribute a portion of budget as dummy expenses
+            if event["Budget"] > 0:
+                expense_amount = event["Budget"] * 0.3 # 30% of budget as dummy expense
+                dummy_expenses.append({
+                    "Event ID": event["Event ID"],
+                    "Category": "General Expenses",
+                    "Amount": expense_amount,
+                    "Date": datetime.date.today()
+                })
+        
+        if dummy_expenses:
+            expenses = pd.DataFrame(dummy_expenses)
+            st.dataframe(expenses, use_container_width=True)
+            
+            total_expenses_dummy = expenses["Amount"].sum()
+            st.metric("Total Expenses Recorded (Conceptual)", f"₹{total_expenses_dummy:,.2f}")
+            st.metric("Estimated Overall Balance", f"₹{total_allocated_budget + total_sponsor_contributions - total_expenses_dummy:,.2f}")
+        else:
+            st.info("No dummy expenses generated for events with a budget.")
 
 
 def show_reports():
@@ -823,7 +759,7 @@ def show_reports():
     st.markdown("---")
     st.write("Generate various analytical reports for better event insights.")
 
-    report_type = st.selectbox("Select Report Type", ["Event Participation", "Budget vs Actual", "Volunteer Engagement", "Sponsor Contribution"])
+    report_type = st.selectbox("Select Report Type", ["Event Participation", "Budget vs Conceptual Expenses", "Volunteer Engagement", "Sponsor Contribution"])
 
     if report_type == "Event Participation":
         st.subheader("Event Participation Report 🧑‍🤝‍🧑")
@@ -835,20 +771,32 @@ def show_reports():
             st.dataframe(participation_merged.sort_values("Participants", ascending=False), use_container_width=True)
             st.bar_chart(participation_merged.set_index("Name")["Participants"])
 
-    elif report_type == "Budget vs Actual":
-        st.subheader("Budget vs Actual Expenses Report 💸")
-        st.warning("This report currently uses dummy expense data. Integrate with actual expense tracking for real data.")
-        expenses_data = { # Re-using dummy expense data
-            "Category": ["Marketing", "Venue Rental", "Artist Fees", "Equipment", "Food"],
-            "Amount": [15000, 20000, 30000, 10000, 12000],
-            "Event ID": ["E001", "E002", "E001", "E003", "E002"]
-        }
-        expenses = pd.DataFrame(expenses_data)
-        event_expenses = expenses.groupby("Event ID")["Amount"].sum().reset_index(name="Actual Expenses")
-        budget_vs_actual = pd.merge(st.session_state.events_df[["Event ID", "Name", "Budget"]], event_expenses, on="Event ID", how="left").fillna(0)
-        budget_vs_actual["Variance"] = budget_vs_actual["Budget"] - budget_vs_actual["Actual Expenses"]
-        st.dataframe(budget_vs_actual, use_container_width=True)
-        st.bar_chart(budget_vs_actual.set_index("Name")[["Budget", "Actual Expenses"]])
+    elif report_type == "Budget vs Conceptual Expenses":
+        st.subheader("Budget vs Conceptual Expenses Report 💸")
+        st.warning("This report currently uses conceptual expense data. Integrate with actual expense tracking for real data.")
+        
+        if st.session_state.events_df.empty:
+            st.info("No events with budget data.")
+        else:
+            dummy_expenses = []
+            for _, event in st.session_state.events_df.iterrows():
+                if event["Budget"] > 0:
+                    expense_amount = event["Budget"] * 0.3
+                    dummy_expenses.append({
+                        "Event ID": event["Event ID"],
+                        "Amount": expense_amount
+                    })
+            
+            if dummy_expenses:
+                expenses_df = pd.DataFrame(dummy_expenses)
+                event_expenses = expenses_df.groupby("Event ID")["Amount"].sum().reset_index(name="Conceptual Expenses")
+                budget_vs_actual = pd.merge(st.session_state.events_df[["Event ID", "Name", "Budget"]], event_expenses, on="Event ID", how="left").fillna(0)
+                budget_vs_actual["Variance"] = budget_vs_actual["Budget"] - budget_vs_actual["Conceptual Expenses"]
+                st.dataframe(budget_vs_actual, use_container_width=True)
+                st.bar_chart(budget_vs_actual.set_index("Name")[["Budget", "Conceptual Expenses"]])
+            else:
+                st.info("No conceptual expenses to display for events.")
+
 
     elif report_type == "Volunteer Engagement":
         st.subheader("Volunteer Engagement Report 💪")
@@ -977,9 +925,6 @@ def show_event_task_management():
                         if assigned_to_volunteer:
                             volunteer_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_to_volunteer]
                             if not volunteer_email_row.empty:
-                                # For demo, we don't have email in USERS directly, assume a dummy or add it.
-                                # For a real system, you'd add an email column to the users sheet.
-                                # For now, we'll just log/simulate.
                                 dummy_volunteer_email = f"{assigned_to_volunteer}@example.com" 
                                 email_subject = f"New Task Assignment for {event_name}"
                                 email_body = f"Hello {USERS[assigned_to_volunteer]['Name']},\n\nYou have been assigned a new task for '{event_name}':\n\nTask: {task_description}\nDue Date: {due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
@@ -1038,7 +983,7 @@ def show_volunteer_assignment():
                             ].index
                             
                             if not task_idx.empty:
-                                old_assigned_volunteer = st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"].iloc[0]
+                                # old_assigned_volunteer = st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"].iloc[0] # Not directly used for logic
                                 
                                 if assigned_volunteer: # Assign or Reassign
                                     st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"] = assigned_volunteer
@@ -1050,8 +995,10 @@ def show_volunteer_assignment():
                                     volunteer_user_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_volunteer]
                                     if not volunteer_user_row.empty:
                                         dummy_volunteer_email = f"{assigned_volunteer}@example.com"
-                                        email_subject = f"Your Task Assignment for {my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}"
-                                        email_body = f"Hello {USERS[assigned_volunteer]['Name']},\n\nYou have been assigned a task for '{my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}':\n\nTask: {selected_task_description}\nDue Date: {st.session_state.tasks_df.loc[task_idx, 'Due Date'].iloc[0]}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
+                                        event_full_name = my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]
+                                        email_subject = f"Your Task Assignment for {event_full_name}"
+                                        task_due_date = st.session_state.tasks_df.loc[task_idx, 'Due Date'].iloc[0]
+                                        email_body = f"Hello {USERS[assigned_volunteer]['Name']},\n\nYou have been assigned a task for '{event_full_name}':\n\nTask: {selected_task_description}\nDue Date: {task_due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
                                         send_email(dummy_volunteer_email, email_subject, email_body)
                                 else: # Unassign
                                     st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"] = None
@@ -1066,7 +1013,7 @@ def show_volunteer_assignment():
                             st.error("Please select a task.")
 
 def show_event_budget_tracking():
-    """Coordinator: Track budget and expenses for their assigned events."""
+    """Coordinator: Track budget and conceptual expenses for their assigned events."""
     st.title("💸 Event Budget Tracking")
     st.markdown("---")
     st.write(f"Track the budget for events you coordinate, {st.session_state.user_full_name}.")
@@ -1086,41 +1033,44 @@ def show_event_budget_tracking():
         st.subheader(f"Budget for {event_info['Name']} ({selected_event_id})")
         st.metric("Allocated Budget", f"₹{event_info['Budget']:,.2f}")
 
-        st.subheader("Recorded Expenses (Dummy Data) 📉")
-        st.warning("This is dummy expense data. In a real system, you would integrate actual expense recording.")
+        st.subheader("Conceptual Expenses 📉")
+        st.warning("This is conceptual expense data for demonstration. In a real system, you would integrate actual expense recording.")
         
-        # Filter dummy expenses for the selected event
-        expenses_data_all = {
-            "Expense ID": ["EXP001", "EXP002", "EXP003", "EXP004", "EXP005"],
-            "Category": ["Decorations", "Venue Rental", "Artist Fees", "Equipment", "Food"],
-            "Amount": [10000, 20000, 30000, 10000, 12000],
-            "Date": [datetime.date(2025, 10, 10), datetime.date(2025, 11, 15), datetime.date(2025, 10, 12), datetime.date(2025, 12, 1), datetime.date(2025, 11, 18)],
-            "Event ID": ["E001", "E002", "E001", "E003", "E002"]
-        }
-        all_expenses_df = pd.DataFrame(expenses_data_all)
-        event_expenses_for_display = all_expenses_df[all_expenses_df["Event ID"] == selected_event_id]
+        # Generate conceptual expenses for the selected event
+        event_conceptual_expenses = []
+        if event_info["Budget"] > 0:
+            conceptual_expense_amount = event_info["Budget"] * 0.3 # 30% of budget
+            event_conceptual_expenses.append({
+                "Expense ID": "EXP_C1",
+                "Category": "General Conceptual Expense",
+                "Amount": conceptual_expense_amount,
+                "Date": datetime.date.today(),
+                "Event ID": selected_event_id
+            })
+
+        event_expenses_for_display = pd.DataFrame(event_conceptual_expenses)
 
         if event_expenses_for_display.empty:
-            st.info("No expenses recorded for this event yet (dummy data).")
+            st.info("No conceptual expenses recorded for this event yet.")
         else:
             st.dataframe(event_expenses_for_display[["Expense ID", "Category", "Amount", "Date"]], use_container_width=True)
 
-        total_expenses = event_expenses_for_display["Amount"].sum() if not event_expenses_for_display.empty else 0
-        st.metric("Total Expenses Recorded (Dummy)", f"₹{total_expenses:,.2f}")
-        st.metric("Remaining Budget", f"₹{event_info['Budget'] - total_expenses:,.2f}")
+        total_conceptual_expenses = event_expenses_for_display["Amount"].sum() if not event_expenses_for_display.empty else 0
+        st.metric("Total Conceptual Expenses", f"₹{total_conceptual_expenses:,.2f}")
+        st.metric("Remaining Budget (Conceptual)", f"₹{event_info['Budget'] - total_conceptual_expenses:,.2f}")
 
-        st.subheader("Add New Expense (Dummy Entry) ➕")
-        with st.expander("Add a new dummy expense"):
+        st.subheader("Add New Expense (Conceptual Entry) ➕")
+        with st.expander("Add a new conceptual expense"):
             with st.form(f"add_expense_form_{selected_event_id}"):
                 expense_category = st.text_input("Expense Category")
                 expense_amount = st.number_input("Amount", min_value=0.0, value=0.0, step=100.0)
                 expense_date = st.date_input("Date", datetime.date.today())
-                add_expense_button = st.form_submit_button("Add Expense (Dummy)")
+                add_expense_button = st.form_submit_button("Add Expense (Conceptual)")
                 if add_expense_button:
                     if expense_category and expense_amount > 0:
-                        st.info(f"Dummy Expense Added: Event '{event_info['Name']}' - {expense_category} - ₹{expense_amount} on {expense_date}. (This entry is not saved persistently.)")
+                        st.info(f"Conceptual Expense Added: Event '{event_info['Name']}' - {expense_category} - ₹{expense_amount} on {expense_date}. (This entry is not saved persistently.)")
                     else:
-                        st.error("Please provide a category and a positive amount for the dummy expense.")
+                        st.error("Please provide a category and a positive amount for the conceptual expense.")
 
 def show_communication_hub():
     """Coordinator: View general announcements and potentially send event-specific communications."""
@@ -1144,8 +1094,8 @@ def show_communication_hub():
                 st.markdown(f"**Target Audience:** {row['Target Role']}")
             st.markdown("---")
 
-    st.subheader("Send Event-Specific Message (Simplified) ✉️")
-    st.info("This is a simplified message sending feature. In a real system, this would integrate with email/notification services.")
+    st.subheader("Send Event-Specific Message (Conceptual) ✉️")
+    st.info("This is a conceptual message sending feature. In a real system, this would integrate with email/notification services.")
     with st.expander("Send a Message"):
         with st.form("send_message_form"):
             my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name]
@@ -1156,12 +1106,12 @@ def show_communication_hub():
             message_subject = st.text_input("Subject")
             message_content = st.text_area("Message Content")
             
-            send_button = st.form_submit_button("Send Message (Dummy)")
+            send_button = st.form_submit_button("Send Message (Conceptual)")
 
             if send_button:
                 if message_subject and message_content:
                     target_display = f"for Event '{my_events_df[my_events_df['Event ID'] == target_event_id]['Name'].iloc[0]}'" if target_event_id else "General Audience"
-                    st.success(f"Dummy Message Sent: Subject '{message_subject}' to {target_display}. (Not persistently saved or sent.)")
+                    st.success(f"Conceptual Message Sent: Subject '{message_subject}' to {target_display}. (Not persistently saved or sent.)")
                 else:
                     st.error("Please provide a subject and content for the message.")
 
@@ -1178,8 +1128,8 @@ def show_view_event_details():
     filtered_events = st.session_state.events_df
     if search_query:
         filtered_events = filtered_events[
-            filtered_events["Name"].str.contains(search_query, case=False) |
-            filtered_events["Location"].str.contains(search_query, case=False)
+            filtered_events["Name"].str.contains(search_query, case=False, na=False) |
+            filtered_events["Location"].str.contains(search_query, case=False, na=False)
         ]
 
     if filtered_events.empty:
@@ -1204,7 +1154,7 @@ def show_view_event_details():
             with col2:
                 st.write(f"**Coordinator:** `{event_details['Coordinator']}`")
                 st.write(f"**Status:** `{event_details['Status']}`")
-                if event_details['Budget'] > 0:
+                if 'Budget' in event_details and event_details['Budget'] > 0:
                     st.write(f"**Budget:** `₹{event_details['Budget']:,.2f}` (Internal)")
                 
             st.markdown("---")
@@ -1242,8 +1192,8 @@ def show_register_for_events():
     
     if search_query:
         upcoming_events = upcoming_events[
-            upcoming_events["Name"].str.contains(search_query, case=False) |
-            upcoming_events["Location"].str.contains(search_query, case=False)
+            upcoming_events["Name"].str.contains(search_query, case=False, na=False) |
+            upcoming_events["Location"].str.contains(search_query, case=False, na=False)
         ]
 
     if upcoming_events.empty:
@@ -1286,11 +1236,11 @@ def show_register_for_events():
                         # Send email notification to participant
                         participant_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == st.session_state.username]
                         if not participant_email_row.empty:
-                            # For demo, we don't have email in USERS directly, assume a dummy or add it.
-                            # For a real system, you'd add an email column to the users sheet.
                             dummy_participant_email = f"{st.session_state.username}@example.com"
+                            event_date = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Date'].iloc[0]
+                            event_location = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Location'].iloc[0]
                             email_subject = f"Registration Confirmation for {event_name}"
-                            email_body = f"Hello {st.session_state.user_full_name},\n\nThis is to confirm your registration for '{event_name}'.\n\nEvent Date: {upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Date'].iloc[0]}\nEvent Location: {upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Location'].iloc[0]}\n\nWe look forward to seeing you there!\n\nRegards,\nFestive Event Team"
+                            email_body = f"Hello {st.session_state.user_full_name},\n\nThis is to confirm your registration for '{event_name}'.\n\nEvent Date: {event_date}\nEvent Location: {event_location}\n\nWe look forward to seeing you there!\n\nRegards,\nFestive Event Team"
                             send_email(dummy_participant_email, email_subject, email_body)
                         st.rerun()
                 else:
@@ -1422,7 +1372,7 @@ def show_update_availability():
             st.session_state.volunteers_df.loc[volunteer_idx, "Availability"] = new_availability
             google_db.save_dataframe("volunteers", st.session_state.volunteers_df) # Save to Google Sheet
         else:
-            # If for some reason the volunteer isn't in volunteers_df, add them
+            # If for some reason the volunteer isn't in volunteers_df, add them (edge case)
             new_volunteer_entry = {
                 "Volunteer Username": st.session_state.username,
                 "Full Name": st.session_state.user_full_name,
@@ -1446,7 +1396,9 @@ if not st.session_state.logged_in:
     with st.sidebar.form("login_form"):
         username = st.text_input("Username", key="login_username_input")
         password = st.text_input("Password", type="password", key="login_password_input")
-        login_button = st.form_submit_button("Login")
+        # Only allow login attempts if there are actually users loaded from Sheets (or mock data if enabled)
+        login_disabled = not bool(USERS)
+        login_button = st.form_submit_button("Login", disabled=login_disabled)
         if login_button:
             login(username, password)
     

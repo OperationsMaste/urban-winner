@@ -2,11 +2,9 @@ import streamlit as st
 import pandas as pd
 import datetime
 import json
-# For email (uncomment and configure if you want actual emails sent)
 import smtplib
 from email.mime.text import MIMEText
 
-# For Google Sheets (uncomment if you've set up gspread)
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -14,9 +12,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.set_page_config(layout="wide", page_title="Inter-College Festive Event ERP")
 
 # --- Glassmorphism CSS (Injected at the start) ---
-# This CSS attempts to target common Streamlit elements for a Glassmorphism effect.
-# You may need to inspect your browser's dev tools to fine-tune selectors and properties
-# if you add more custom components or Streamlit updates its DOM structure.
 GLASSMORPHISM_CSS = """
 <style>
 /* Basic body styling */
@@ -148,84 +143,28 @@ img {
 st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 
 
-# --- Google Sheets Database Configuration ---
-# You NEED to set these in .streamlit/secrets.toml
-# [google_sheets]
-# service_account_key = """{...json content...}"""
-# spreadsheet_name = "FestiveEventERP_DB"
-
+# --- Google Sheets Database Global Configuration ---
+# These are module-level global variables for GSheet connectivity status and client objects.
+# The cached function and GoogleSheetDB class will refer to these.
 _gspread_enabled = False
 _client = None
 _spreadsheet = None
+_spreadsheet_name_global = "Mock Sheet" # Default name, updated if GSheets enabled
 
-try:
-    if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
-        _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
-        _scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        
-        _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
-        _client = gspread.authorize(_creds)
-        _spreadsheet = _client.open(st.secrets.google_sheets.spreadsheet_name)
-        _gspread_enabled = True
-        st.success("Google Sheets integration enabled. ✅")
-    else:
-        st.warning("Google Sheets secrets not found. Running with in-memory data. Please configure `secrets.toml`.")
-except Exception as e:
-    st.error(f"Error initializing Google Sheets: {e}. Running with in-memory data.")
-    _gspread_enabled = False
+# Global mock data to be used when gspread is disabled or fails
+_global_mock_data = {}
 
-class GoogleSheetDB:
-    """
-    A class to manage interactions with Google Sheets as a database.
-    This version includes a mock mode if gspread is not configured.
-    """
-    def __init__(self, spreadsheet_name, client=None, gspread_enabled=False):
-        self._spreadsheet_name = spreadsheet_name
-        self._client = client # The gspread client object (can be None in mock mode)
-        self._gspread_enabled = gspread_enabled # Current state of GSheets connectivity
-        self._sheets_cache = {} # Simple in-memory cache for loaded sheets
-        self.mock_data = {} # For mock mode
-
-        # Initialize mock data with empty dataframes mirroring structure if not enabled
-        if not self._gspread_enabled:
-            self.mock_data = {
-                "users": pd.DataFrame(columns=["Username", "Password", "Role", "Name", "Availability"]),
-                "events": pd.DataFrame(columns=["Event ID", "Name", "Date", "Time", "Location", "Coordinator", "Budget", "Status", "Description"]),
-                "registrations": pd.DataFrame(columns=["Reg ID", "Participant Username", "Event ID", "Registration Date"]),
-                "volunteers": pd.DataFrame(columns=["Volunteer Username", "Full Name", "Availability"]),
-                "tasks": pd.DataFrame(columns=["Task ID", "Event ID", "Description", "Assigned To Volunteer Username", "Due Date", "Status", "Created By"]),
-                "announcements": pd.DataFrame(columns=["Announcement ID", "Title", "Content", "Author Username", "Date Posted", "Target Role"]),
-                "sponsors": pd.DataFrame(columns=["Sponsor ID", "Name", "Contact Person", "Contact Email", "Contribution Amount", "Tier", "Date Added"])
-            }
-            # Populate mock data with initial data for demo (same as previous in-memory)
-            self._populate_mock_data()
-
-    # --- Implement __hash__ and __eq__ to make instances hashable for Streamlit's cache ---
-    def __hash__(self):
-        # The hash should reflect the state that affects the cached function's output.
-        # We hash based on spreadsheet_name and _gspread_enabled.
-        # This means if _gspread_enabled changes (e.g., due to an error and fallback),
-        # the hash changes, invalidating previous cached results for this instance.
-        return hash((self._spreadsheet_name, self._gspread_enabled))
-
-    def __eq__(self, other):
-        if not isinstance(other, GoogleSheetDB):
-            return NotImplemented
-        return self._spreadsheet_name == other._spreadsheet_name and \
-               self._gspread_enabled == other._gspread_enabled
-    # ----------------------------------------------------------------------------------
-
-    def _populate_mock_data(self):
-        # Users
-        self.mock_data["users"] = pd.DataFrame([
+# Helper to populate global mock data
+def _populate_global_mock_data_init():
+    global _global_mock_data
+    _global_mock_data = {
+        "users": pd.DataFrame([
             {"Username": "admin", "Password": "admin", "Role": "Admin", "Name": "Alice Admin", "Availability": "N/A"},
             {"Username": "coord1", "Password": "coord", "Role": "Coordinator", "Name": "Bob Coordinator", "Availability": "N/A"},
             {"Username": "part1", "Password": "part", "Role": "Participant", "Name": "Charlie Participant", "Availability": "N/A"},
             {"Username": "volun1", "Password": "volun", "Role": "Volunteer", "Name": "Diana Volunteer", "Availability": "Available"},
-        ])
-
-        # Events
-        self.mock_data["events"] = pd.DataFrame({
+        ]),
+        "events": pd.DataFrame({
             "Event ID": ["E001", "E002", "E003"],
             "Name": ["Tech Fest", "Cultural Gala", "Sports Day"],
             "Date": [datetime.date(2025, 10, 15), datetime.date(2025, 11, 20), datetime.date(2025, 12, 5)],
@@ -239,73 +178,114 @@ class GoogleSheetDB:
                 "An evening celebrating diverse cultural performances.",
                 "Inter-college sports competition across various disciplines."
             ]
-        })
-
-        # Registrations
-        self.mock_data["registrations"] = pd.DataFrame([
+        }),
+        "registrations": pd.DataFrame([
             {"Reg ID": "R001", "Participant Username": "part1", "Event ID": "E001", "Registration Date": datetime.date.today()}
-        ])
-
-        # Volunteers (profiles)
-        self.mock_data["volunteers"] = pd.DataFrame([
+        ]),
+        "volunteers": pd.DataFrame([
             {"Volunteer Username": "volun1", "Full Name": "Diana Volunteer", "Availability": "Available"}
-        ])
-
-        # Tasks
-        self.mock_data["tasks"] = pd.DataFrame([
+        ]),
+        "tasks": pd.DataFrame([
             {"Task ID": "T001", "Event ID": "E001", "Description": "Set up registration desk", "Assigned To Volunteer Username": "volun1", "Due Date": datetime.date(2025, 10, 14), "Status": "Assigned", "Created By": "coord1"},
             {"Task ID": "T002", "Event ID": "E001", "Description": "Guide guests to main hall", "Assigned To Volunteer Username": "volun1", "Due Date": datetime.date(2025, 10, 15), "Status": "Assigned", "Created By": "coord1"},
-        ])
-
-        # Announcements
-        self.mock_data["announcements"] = pd.DataFrame([
+        ]),
+        "announcements": pd.DataFrame([
             {"Announcement ID": "A001", "Title": "Welcome to the ERP!", "Content": "This is the new Inter-College Festive Event ERP. Explore its features!", "Author Username": "admin", "Date Posted": datetime.date.today(), "Target Role": "All"},
             {"Announcement ID": "A002", "Title": "Volunteer Briefing for Tech Fest", "Content": "Mandatory briefing for all Tech Fest volunteers on Oct 10th.", "Author Username": "coord1", "Date Posted": datetime.date.today(), "Target Role": "Volunteer"},
-        ])
-
-        # Sponsors
-        self.mock_data["sponsors"] = pd.DataFrame([
+        ]),
+        "sponsors": pd.DataFrame([
             {"Sponsor ID": "S001", "Name": "Mega Corp", "Contact Person": "John Doe", "Contact Email": "john.doe@megacorp.com", "Contribution Amount": 100000, "Tier": "Platinum", "Date Added": datetime.date.today()}
         ])
+    }
 
-    @st.cache_data(ttl=300) # Cache sheet data for 5 minutes
-    def _read_sheet_cached(self, sheet_name):
-        """Helper to read a sheet with caching."""
-        st.info(f"Loading data for '{sheet_name}' from {'Google Sheets' if self._gspread_enabled else 'in-memory mock'}...")
-        if self._gspread_enabled:
-            try:
-                # Use the globally authorized _spreadsheet object
-                if _spreadsheet is None: # Defensive check
-                    raise ValueError("Google Sheets client not initialized.")
-                worksheet = _spreadsheet.worksheet(sheet_name)
-                data = worksheet.get_all_records()
-                df = pd.DataFrame(data)
-                # Convert specific columns to datetime.date objects where appropriate
-                for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
-                    if col in df.columns:
-                        # Use errors='coerce' to turn unparseable dates into NaT (Not a Time)
-                        df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
-                return df
-            except Exception as e:
-                st.error(f"Failed to read sheet '{sheet_name}' from Google Sheets: {e}")
-                st.warning("Falling back to in-memory mock data for this operation. Disabling Google Sheets for this session.")
-                self._gspread_enabled = False # Propagate failure to instance state
-                st.rerun() # Rerun to re-evaluate based on new _gspread_enabled state
-                return self.mock_data.get(sheet_name, pd.DataFrame()) # Fallback to mock if gspread fails
-        else:
-            return self.mock_data.get(sheet_name, pd.DataFrame())
+# Attempt to initialize Google Sheets client
+try:
+    if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
+        _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
+        _scope = ['https://sheets.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'] # Adjusted scope for gspread
+        
+        _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
+        _client = gspread.authorize(_creds)
+        _spreadsheet_name_global = st.secrets.google_sheets.spreadsheet_name
+        _spreadsheet = _client.open(_spreadsheet_name_global)
+        _gspread_enabled = True
+        st.success("Google Sheets integration enabled. ✅")
+    else:
+        st.warning("Google Sheets secrets not found. Running with in-memory data. Please configure `secrets.toml`.")
+        _populate_global_mock_data_init() # Initialize mock data if GSheets is disabled
+except Exception as e:
+    st.error(f"Error initializing Google Sheets: {e}. Running with in-memory data.")
+    _gspread_enabled = False
+    _populate_global_mock_data_init() # Initialize mock data if GSheets fails
+
+# --- Global Cached Function for Reading Sheets ---
+@st.cache_data(ttl=300) # Cache sheet data for 5 minutes
+def _read_sheet_data_cached(gspread_is_enabled: bool, spreadsheet_name: str, sheet_name: str) -> pd.DataFrame:
+    """
+    Helper function to read a sheet with caching. It explicitly takes hashable arguments.
+    It uses the global _spreadsheet object and _global_mock_data.
+    """
+    st.info(f"Loading data for '{sheet_name}' from {'Google Sheets' if gspread_is_enabled else 'in-memory mock'}...")
+    
+    global _spreadsheet, _gspread_enabled # Declare globals used within this function
+
+    if gspread_is_enabled:
+        try:
+            if _spreadsheet is None: # Defensive check, should ideally not happen if gspread_is_enabled is True
+                raise ValueError("Google Sheets client not initialized for reading, despite being enabled.")
+            
+            worksheet = _spreadsheet.worksheet(sheet_name)
+            data = worksheet.get_all_records()
+            df = pd.DataFrame(data)
+            # Convert specific columns to datetime.date objects where appropriate
+            for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
+                if col in df.columns:
+                    # Use errors='coerce' to turn unparseable dates into NaT (Not a Time)
+                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+            return df
+        except Exception as e:
+            st.error(f"Failed to read sheet '{sheet_name}' from Google Sheets: {e}")
+            st.warning("Falling back to in-memory mock data for this operation. Disabling Google Sheets for subsequent operations within this session.")
+            _gspread_enabled = False # Propagate failure globally
+            st.rerun() # Rerun to re-evaluate based on new _gspread_enabled state
+            return _global_mock_data.get(sheet_name, pd.DataFrame(columns=_get_mock_columns(sheet_name))) # Fallback to mock
+    else:
+        return _global_mock_data.get(sheet_name, pd.DataFrame(columns=_get_mock_columns(sheet_name))) # Return empty DF with correct columns if not found
+
+def _get_mock_columns(sheet_name):
+    # Helper to get expected columns for an empty DataFrame in mock mode
+    if sheet_name == "users": return ["Username", "Password", "Role", "Name", "Availability"]
+    if sheet_name == "events": return ["Event ID", "Name", "Date", "Time", "Location", "Coordinator", "Budget", "Status", "Description"]
+    if sheet_name == "registrations": return ["Reg ID", "Participant Username", "Event ID", "Registration Date"]
+    if sheet_name == "volunteers": return ["Volunteer Username", "Full Name", "Availability"]
+    if sheet_name == "tasks": return ["Task ID", "Event ID", "Description", "Assigned To Volunteer Username", "Due Date", "Status", "Created By"]
+    if sheet_name == "announcements": return ["Announcement ID", "Title", "Content", "Author Username", "Date Posted", "Target Role"]
+    if sheet_name == "sponsors": return ["Sponsor ID", "Name", "Contact Person", "Contact Email", "Contribution Amount", "Tier", "Date Added"]
+    return []
+
+# --- GoogleSheetDB Class (Orchestrator) ---
+class GoogleSheetDB:
+    """
+    A class to manage interactions with Google Sheets as a database.
+    This version delegates reading to a globally cached function and
+    writes directly to global state/gspread client.
+    """
+    def __init__(self, spreadsheet_name):
+        self._spreadsheet_name = spreadsheet_name
 
     def read_sheet(self, sheet_name):
-        """Reads data from a specified worksheet, using cache."""
-        return self._read_sheet_cached(sheet_name)
+        """Reads data from a specified worksheet, using the global cached function."""
+        # Pass current global _gspread_enabled and _spreadsheet_name_global to the cached function
+        return _read_sheet_data_cached(_gspread_enabled, _spreadsheet_name_global, sheet_name)
 
-    def _write_sheet(self, sheet_name, df):
-        """Helper to write data to a sheet (no caching)."""
-        if self._gspread_enabled:
+    def save_dataframe(self, sheet_name, df):
+        """Saves a DataFrame to a worksheet and updates global mock data."""
+        global _spreadsheet, _global_mock_data, _gspread_enabled # Declare globals to be used
+
+        if _gspread_enabled:
             try:
-                # Use the globally authorized _spreadsheet object
                 if _spreadsheet is None: # Defensive check
-                    raise ValueError("Google Sheets client not initialized.")
+                    raise ValueError("Google Sheets client not initialized for writing.")
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 worksheet.clear() # Clear existing content
                 # Convert datetime.date objects to string for gspread
@@ -318,45 +298,35 @@ class GoogleSheetDB:
             except Exception as e:
                 st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
                 st.warning("Data saved to in-memory mock only. Disabling Google Sheets for this session.")
-                self._gspread_enabled = False # Propagate failure to instance state
+                _gspread_enabled = False # Propagate failure globally
                 st.rerun() # Rerun to re-evaluate based on new _gspread_enabled state
         
-        self.mock_data[sheet_name] = df # Update mock data regardless
-        st.cache_data.clear() # Clear cache for all sheets after a write
+        _global_mock_data[sheet_name] = df # Update mock data regardless of gspread status
+        st.cache_data.clear() # Clear cache for all sheets after a write (important!)
         # st.rerun() # Re-run app to reflect changes immediately (careful with too many reruns)
-
-    def save_dataframe(self, sheet_name, df):
-        """Saves a DataFrame to a worksheet."""
-        self._write_sheet(sheet_name, df)
 
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
-    spreadsheet_name=st.secrets.google_sheets.spreadsheet_name if _gspread_enabled else "Mock Sheet",
-    client=_client if _gspread_enabled else None, 
-    gspread_enabled=_gspread_enabled
+    spreadsheet_name=_spreadsheet_name_global
 )
 
 
 # --- Session State Initialization ---
-# This ensures that these variables exist even on first run and persist across reruns for the same user session
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = None
     st.session_state.role = None
-    st.session_state.user_full_name = None # Store full name for display
-    st.session_state.current_page = "Home" # Default page for logged-in users or public
+    st.session_state.user_full_name = None
+    st.session_state.current_page = "Home"
 
-# Load initial data from Google Sheets (or mock data)
-# These will be DataFrames, which are easy to work with in Streamlit
+# Load initial data from Google Sheets (or mock data) into session state
 if "users_df" not in st.session_state:
     st.session_state.users_df = google_db.read_sheet("users")
-    # For initial login, recreate USERS dict from loaded data
-    # In a real app, passwords should be hashed and salted!
-    global USERS # Global declaration for the initial assignment at script load
+    global USERS 
     if "Username" in st.session_state.users_df.columns:
         USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
     else:
-        USERS = {} # Fallback if sheet is empty or malformed
+        USERS = {}
 
 if "events_df" not in st.session_state:
     st.session_state.events_df = google_db.read_sheet("events")
@@ -383,13 +353,11 @@ ROLE_PAGES = {
     "Coordinator": ["Home", "Announcements", "My Events", "Event Task Management", "Volunteer Assignment", "Event Budget Tracking", "Communication Hub"],
     "Participant": ["Home", "Announcements", "View Event Details", "Register for Events", "My Registrations"],
     "Volunteer": ["Home", "Announcements", "My Tasks", "Update Availability"],
-    "Public": ["Home", "View Event Details", "Announcements"] # Pages visible when not logged in
+    "Public": ["Home", "View Event Details", "Announcements"]
 }
 
 
 # --- Email Helper Function ---
-# This function is configured with placeholders.
-# Uncomment the smtplib block and provide real credentials in .streamlit/secrets.toml
 def send_email(recipient_email, subject, body):
     """
     Sends an email notification.
@@ -432,25 +400,23 @@ def logout():
     st.session_state.username = None
     st.session_state.role = None
     st.session_state.user_full_name = None
-    st.session_state.current_page = "Home" # Redirect to home page after logout
+    st.session_state.current_page = "Home"
     st.success("You have been logged out. 👋")
-    st.rerun() # Rerun to refresh the UI and show login form
+    st.rerun()
 
 def login(username, password):
     """Authenticates the user and sets session state."""
-    # Check against the USERS dict derived from Google Sheet (or mock)
     if username in USERS and USERS[username]["Password"] == password:
         st.session_state.logged_in = True
         st.session_state.username = username
         st.session_state.role = USERS[username]["Role"]
         st.session_state.user_full_name = USERS[username]["Name"]
         
-        # Set the default page to the first accessible page for the role after login
         accessible_pages_for_role = ROLE_PAGES.get(st.session_state.role, ["Home"])
         st.session_state.current_page = accessible_pages_for_role[0] if accessible_pages_for_role else "Home"
         
         st.success(f"Welcome, {st.session_state.user_full_name} ({st.session_state.role})! 🎉")
-        st.rerun() # Rerun to refresh the UI and show role-specific navigation
+        st.rerun()
     else:
         st.error("Invalid username or password 🚫")
 
@@ -477,7 +443,6 @@ def show_announcements():
 
     current_role = st.session_state.role if st.session_state.logged_in else "Public"
 
-    # Filter announcements based on target role
     relevant_announcements = st.session_state.announcements_df[
         (st.session_state.announcements_df["Target Role"] == "All") |
         (st.session_state.announcements_df["Target Role"] == current_role)
@@ -490,7 +455,7 @@ def show_announcements():
             with st.expander(f"**{row['Title']}** - _Posted by {row['Author Username']} on {row['Date Posted']}_"):
                 st.write(row["Content"])
                 st.markdown(f"**Target Audience:** {row['Target Role']}")
-            st.markdown("---") # Separator between announcements
+            st.markdown("---")
 
     if st.session_state.role in ["Admin", "Coordinator"]:
         st.subheader("Create New Announcement 📝")
@@ -499,7 +464,7 @@ def show_announcements():
                 announcement_title = st.text_input("Title")
                 announcement_content = st.text_area("Content")
                 target_role_options = ["All", "Admin", "Coordinator", "Participant", "Volunteer"]
-                if st.session_state.role == "Coordinator": # Coordinators can only target All or their own role and below (simplified)
+                if st.session_state.role == "Coordinator":
                     target_role_options = ["All", "Coordinator", "Participant", "Volunteer"]
                 announcement_target = st.selectbox("Target Audience", options=target_role_options)
                 
@@ -564,20 +529,18 @@ def show_admin_dashboard():
 
 def show_user_management():
     """Admin User Management: Add/view/edit users."""
-    global USERS # Declare global variable at the beginning of the function
+    global USERS 
     st.title("👤 User Management")
     st.markdown("---")
     st.write("Manage system users, their roles, and basic profiles.")
 
     st.subheader("Existing System Users")
-    # USERS dict is now dynamically loaded/updated from st.session_state.users_df
-    # We will modify st.session_state.users_df directly
     
     if st.session_state.users_df.empty:
         st.info("No users in the system.")
     else:
         editable_users_df = st.data_editor(
-            st.session_state.users_df.drop(columns=["Password"]), # Don't show passwords
+            st.session_state.users_df.drop(columns=["Password"]),
             key="users_editor", 
             use_container_width=True,
             column_config={
@@ -586,14 +549,12 @@ def show_user_management():
             }
         )
         if not editable_users_df.equals(st.session_state.users_df.drop(columns=["Password"])):
-            # Reconstruct the users_df, preserving passwords (they are not edited via data_editor)
             temp_users_df = st.session_state.users_df.copy()
             for col in editable_users_df.columns:
                 if col in temp_users_df.columns:
                     temp_users_df[col] = editable_users_df[col]
-            st.session_state.users_df = temp_users_df # Update the session state DataFrame
-            google_db.save_dataframe("users", st.session_state.users_df) # Save to Google Sheet
-            # Also update the global USERS dict for login
+            st.session_state.users_df = temp_users_df
+            google_db.save_dataframe("users", st.session_state.users_df)
             USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
             st.success("User details updated successfully! ✅")
             st.rerun()
@@ -619,13 +580,13 @@ def show_user_management():
                 else:
                     new_user_entry = {
                         "Username": new_username, 
-                        "Password": new_password, # In real app, hash this!
+                        "Password": new_password,
                         "Role": new_role, 
                         "Name": new_name,
-                        "Availability": "Available" if new_role == "Volunteer" else "N/A" # Default for volunteers
+                        "Availability": "Available" if new_role == "Volunteer" else "N/A"
                     }
                     st.session_state.users_df = pd.concat([st.session_state.users_df, pd.DataFrame([new_user_entry])], ignore_index=True)
-                    google_db.save_dataframe("users", st.session_state.users_df) # Save to Google Sheet
+                    google_db.save_dataframe("users", st.session_state.users_df)
 
                     if new_role == "Volunteer":
                         new_volunteer_profile = {
@@ -636,7 +597,7 @@ def show_user_management():
                         st.session_state.volunteers_df = pd.concat([st.session_state.volunteers_df, pd.DataFrame([new_volunteer_profile])], ignore_index=True)
                         google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
 
-                    USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index") # Update global dict
+                    USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
                     st.success(f"User '{new_username}' added with role '{new_role}'. ✅")
                     st.rerun() 
 
@@ -666,7 +627,7 @@ def show_event_management():
             )
             if not editable_events_df.equals(st.session_state.events_df):
                 st.session_state.events_df = editable_events_df
-                google_db.save_dataframe("events", st.session_state.events_df) # Save to Google Sheet
+                google_db.save_dataframe("events", st.session_state.events_df)
                 st.success("Events updated successfully! ✅")
                 st.rerun()
 
@@ -681,7 +642,6 @@ def show_event_management():
                 time = st.text_input("Time (e.g., 10:00 AM)")
             with col2:
                 location = st.text_input("Location")
-                # Filter for actual coordinators from users_df, add an empty option
                 coordinator_names = st.session_state.users_df[st.session_state.users_df["Role"] == "Coordinator"]["Name"].tolist()
                 coordinator_options = [""] + coordinator_names
                 coordinator = st.selectbox("Coordinator", options=coordinator_options)
@@ -710,7 +670,7 @@ def show_event_management():
                         "Description": description
                     }
                     st.session_state.events_df = pd.concat([st.session_state.events_df, pd.DataFrame([new_event])], ignore_index=True)
-                    google_db.save_dataframe("events", st.session_state.events_df) # Save to Google Sheet
+                    google_db.save_dataframe("events", st.session_state.events_df)
                     st.success(f"Event '{name}' added successfully! 🎉")
                     st.rerun()
 
@@ -739,7 +699,7 @@ def show_sponsor_management():
             )
             if not editable_sponsors_df.equals(st.session_state.sponsors_df):
                 st.session_state.sponsors_df = editable_sponsors_df
-                google_db.save_dataframe("sponsors", st.session_state.sponsors_df) # Save to Google Sheet
+                google_db.save_dataframe("sponsors", st.session_state.sponsors_df)
                 st.success("Sponsor details updated successfully! ✅")
                 st.rerun()
 
@@ -774,7 +734,7 @@ def show_sponsor_management():
                         "Date Added": datetime.date.today()
                     }
                     st.session_state.sponsors_df = pd.concat([st.session_state.sponsors_df, pd.DataFrame([new_sponsor])], ignore_index=True)
-                    google_db.save_dataframe("sponsors", st.session_state.sponsors_df) # Save to Google Sheet
+                    google_db.save_dataframe("sponsors", st.session_state.sponsors_df)
                     st.success(f"Sponsor '{name}' added successfully! 🎉")
                     st.rerun()
 
@@ -802,7 +762,7 @@ def show_budget_overview():
 
     st.subheader("Overall Expenses (Dummy Data) 📉")
     st.warning("This section uses dummy expense data. In a real ERP, integrate with actual financial tracking.")
-    expenses_data = { # Dummy expense data
+    expenses_data = {
         "Category": ["Marketing", "Venue Rental", "Artist Fees", "Equipment", "Food"],
         "Amount": [15000, 20000, 30000, 10000, 12000],
         "Event ID": ["E001", "E002", "E001", "E003", "E002"]
@@ -836,7 +796,7 @@ def show_reports():
     elif report_type == "Budget vs Actual":
         st.subheader("Budget vs Actual Expenses Report 💸")
         st.warning("This report currently uses dummy expense data. Integrate with actual expense tracking for real data.")
-        expenses_data = { # Re-using dummy expense data
+        expenses_data = {
             "Category": ["Marketing", "Venue Rental", "Artist Fees", "Equipment", "Food"],
             "Amount": [15000, 20000, 30000, 10000, 12000],
             "Event ID": ["E001", "E002", "E001", "E003", "E002"]
@@ -854,7 +814,6 @@ def show_reports():
             st.info("No volunteer tasks assigned to report on.")
         else:
             volunteer_tasks_counts = st.session_state.tasks_df.groupby("Assigned To Volunteer Username").size().reset_index(name="Assigned Tasks")
-            # Merge with full names for better display
             volunteer_tasks_merged = pd.merge(volunteer_tasks_counts, st.session_state.volunteers_df[["Volunteer Username", "Full Name"]], on="Volunteer Username", how="left")
             st.dataframe(volunteer_tasks_merged, use_container_width=True)
             st.bar_chart(volunteer_tasks_merged.set_index("Full Name")["Assigned Tasks"])
@@ -897,7 +856,7 @@ def show_my_events():
                 if st.button(f"Update Status for {event_to_update_id}", key=f"update_status_btn_{event_to_update_id}"):
                     idx = st.session_state.events_df[st.session_state.events_df["Event ID"] == event_to_update_id].index
                     st.session_state.events_df.loc[idx, "Status"] = new_status
-                    google_db.save_dataframe("events", st.session_state.events_df) # Save to Google Sheet
+                    google_db.save_dataframe("events", st.session_state.events_df)
                     st.success(f"Status for {event_to_update_id} updated to {new_status}. ✅")
                     st.rerun()
 
@@ -927,7 +886,6 @@ def show_event_task_management():
         if current_event_tasks.empty:
             st.info("No tasks defined for this event yet.")
         else:
-            # Display and allow editing of existing tasks
             editable_tasks_df = st.data_editor(
                 current_event_tasks, 
                 key=f"tasks_editor_{selected_event_id}", 
@@ -938,8 +896,8 @@ def show_event_task_management():
                 }
             )
             if not editable_tasks_df.equals(current_event_tasks):
-                st.session_state.tasks_df = editable_tasks_df # Update the session state DataFrame
-                google_db.save_dataframe("tasks", st.session_state.tasks_df) # Save to Google Sheet
+                st.session_state.tasks_df = editable_tasks_df
+                google_db.save_dataframe("tasks", st.session_state.tasks_df)
                 st.success("Tasks updated successfully! ✅")
                 st.rerun()
 
@@ -947,7 +905,6 @@ def show_event_task_management():
         with st.expander(f"Add a new task for {event_name}"):
             with st.form(f"add_task_form_{selected_event_id}"):
                 task_description = st.text_input("Task Description")
-                # Get volunteer usernames from users_df with role "Volunteer"
                 volunteer_usernames = st.session_state.users_df[st.session_state.users_df["Role"] == "Volunteer"]["Username"].tolist()
                 volunteer_options = [""] + volunteer_usernames
                 assigned_to_volunteer = st.selectbox("Assign to Volunteer (Optional)", options=volunteer_options)
@@ -969,15 +926,12 @@ def show_event_task_management():
                             "Created By": st.session_state.username
                         }
                         st.session_state.tasks_df = pd.concat([st.session_state.tasks_df, pd.DataFrame([new_task])], ignore_index=True)
-                        google_db.save_dataframe("tasks", st.session_state.tasks_df) # Save to Google Sheet
+                        google_db.save_dataframe("tasks", st.session_state.tasks_df)
                         st.success(f"Task '{task_description}' added to '{event_name}'! ✅")
 
                         if assigned_to_volunteer:
                             volunteer_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_to_volunteer]
                             if not volunteer_email_row.empty:
-                                # For demo, we don't have email in USERS directly, assume a dummy or add it.
-                                # For a real system, you'd add an email column to the users sheet.
-                                # For now, we'll just log/simulate.
                                 dummy_volunteer_email = f"{assigned_to_volunteer}@example.com" 
                                 email_subject = f"New Task Assignment for {event_name}"
                                 email_body = f"Hello {USERS[assigned_to_volunteer]['Name']},\n\nYou have been assigned a new task for '{event_name}':\n\nTask: {task_description}\nDue Date: {due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
@@ -1010,7 +964,6 @@ def show_volunteer_assignment():
         if current_event_tasks.empty:
             st.info("No tasks defined for this event yet. Please create tasks in 'Event Task Management' first.")
         else:
-            # Display current assignments
             display_tasks = pd.merge(current_event_tasks, st.session_state.volunteers_df[["Volunteer Username", "Full Name", "Availability"]],
                                      left_on="Assigned To Volunteer Username", right_on="Volunteer Username", how="left").fillna({"Full Name": "Unassigned", "Availability": "N/A"})
             st.dataframe(display_tasks[["Description", "Full Name", "Availability", "Status", "Due Date"]], use_container_width=True)
@@ -1038,23 +991,22 @@ def show_volunteer_assignment():
                             if not task_idx.empty:
                                 old_assigned_volunteer = st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"].iloc[0]
                                 
-                                if assigned_volunteer: # Assign or Reassign
+                                if assigned_volunteer:
                                     st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"] = assigned_volunteer
-                                    st.session_state.tasks_df.loc[task_idx, "Status"] = "Assigned" # Update status to Assigned
-                                    google_db.save_dataframe("tasks", st.session_state.tasks_df) # Save to Google Sheet
+                                    st.session_state.tasks_df.loc[task_idx, "Status"] = "Assigned"
+                                    google_db.save_dataframe("tasks", st.session_state.tasks_df)
                                     st.success(f"Task '{selected_task_description}' assigned to '{assigned_volunteer}'. ✅")
                                     
-                                    # Send email notification to the assigned volunteer
                                     volunteer_user_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_volunteer]
                                     if not volunteer_user_row.empty:
                                         dummy_volunteer_email = f"{assigned_volunteer}@example.com"
                                         email_subject = f"Your Task Assignment for {my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}"
                                         email_body = f"Hello {USERS[assigned_volunteer]['Name']},\n\nYou have been assigned a task for '{my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}':\n\nTask: {selected_task_description}\nDue Date: {st.session_state.tasks_df.loc[task_idx, 'Due Date'].iloc[0]}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
                                         send_email(dummy_volunteer_email, email_subject, email_body)
-                                else: # Unassign
+                                else:
                                     st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"] = None
-                                    st.session_state.tasks_df.loc[task_idx, "Status"] = "Pending" # Update status to Pending
-                                    google_db.save_dataframe("tasks", st.session_state.tasks_df) # Save to Google Sheet
+                                    st.session_state.tasks_df.loc[task_idx, "Status"] = "Pending"
+                                    google_db.save_dataframe("tasks", st.session_state.tasks_df)
                                     st.info(f"Task '{selected_task_description}' unassigned. It is now 'Pending'.")
 
                                 st.rerun()
@@ -1087,7 +1039,6 @@ def show_event_budget_tracking():
         st.subheader("Recorded Expenses (Dummy Data) 📉")
         st.warning("This is dummy expense data. In a real system, you would integrate actual expense recording.")
         
-        # Filter dummy expenses for the selected event
         expenses_data_all = {
             "Expense ID": ["EXP001", "EXP002", "EXP003", "EXP004", "EXP005"],
             "Category": ["Decorations", "Venue Rental", "Artist Fees", "Equipment", "Food"],
@@ -1127,7 +1078,6 @@ def show_communication_hub():
     st.write(f"Manage communications for your events, {st.session_state.user_full_name}.")
 
     st.subheader("Relevant Announcements")
-    # Display announcements relevant to coordinator or all
     coordinator_relevant_announcements = st.session_state.announcements_df[
         (st.session_state.announcements_df["Target Role"] == "All") |
         (st.session_state.announcements_df["Target Role"] == "Coordinator")
@@ -1210,7 +1160,6 @@ def show_view_event_details():
             st.markdown(event_details['Description'])
             
             if st.session_state.logged_in and st.session_state.role == "Participant":
-                # Check registration status
                 is_registered = not st.session_state.registrations_df[
                     (st.session_state.registrations_df["Participant Username"] == st.session_state.username) &
                     (st.session_state.registrations_df["Event ID"] == selected_event_id)
@@ -1277,15 +1226,12 @@ def show_register_for_events():
                             "Registration Date": datetime.date.today()
                         }
                         st.session_state.registrations_df = pd.concat([st.session_state.registrations_df, pd.DataFrame([new_registration])], ignore_index=True)
-                        google_db.save_dataframe("registrations", st.session_state.registrations_df) # Save to Google Sheet
+                        google_db.save_dataframe("registrations", st.session_state.registrations_df)
                         event_name = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Name'].iloc[0]
                         st.success(f"Successfully registered for event '{event_name}'! 🎉")
 
-                        # Send email notification to participant
                         participant_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == st.session_state.username]
                         if not participant_email_row.empty:
-                            # For demo, we don't have email in USERS directly, assume a dummy or add it.
-                            # For a real system, you'd add an email column to the users sheet.
                             dummy_participant_email = f"{st.session_state.username}@example.com"
                             email_subject = f"Registration Confirmation for {event_name}"
                             email_body = f"Hello {st.session_state.user_full_name},\n\nThis is to confirm your registration for '{event_name}'.\n\nEvent Date: {upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Date'].iloc[0]}\nEvent Location: {upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Location'].iloc[0]}\n\nWe look forward to seeing you there!\n\nRegards,\nFestive Event Team"
@@ -1306,14 +1252,13 @@ def show_my_registrations():
         st.info("You haven't registered for any events yet.")
         return
 
-    # Merge with event details for better display
     display_regs = pd.merge(my_regs, st.session_state.events_df[["Event ID", "Name", "Date", "Location", "Status"]], on="Event ID", how="left")
     st.subheader("Your Registered Events")
     st.dataframe(display_regs[["Name", "Date", "Location", "Status", "Registration Date"]], use_container_width=True)
 
     st.subheader("Cancel Registration ❌")
     with st.expander("Cancel an Event Registration"):
-        events_for_cancellation = display_regs[display_regs["Status"] == "Upcoming"] # Only allow cancelling upcoming events
+        events_for_cancellation = display_regs[display_regs["Status"] == "Upcoming"]
         if events_for_cancellation.empty:
             st.info("No upcoming events to cancel registration for.")
         else:
@@ -1335,7 +1280,7 @@ def show_my_registrations():
                         ~((st.session_state.registrations_df["Participant Username"] == st.session_state.username) &
                           (st.session_state.registrations_df["Event ID"] == event_to_cancel_id))
                     ]
-                    google_db.save_dataframe("registrations", st.session_state.registrations_df) # Save to Google Sheet
+                    google_db.save_dataframe("registrations", st.session_state.registrations_df)
                     st.success(f"Registration for '{events_for_cancellation[events_for_cancellation['Event ID'] == event_to_cancel_id]['Name'].iloc[0]}' cancelled successfully. 👋")
                     st.rerun()
             else:
@@ -1354,7 +1299,6 @@ def show_my_tasks():
         st.info("You currently have no tasks assigned.")
         return
 
-    # Merge with event details for better display
     display_tasks = pd.merge(my_tasks, st.session_state.events_df[["Event ID", "Name", "Date", "Location"]], on="Event ID", how="left")
     st.subheader("Your Assigned Tasks")
     st.dataframe(display_tasks[["Name", "Date", "Location", "Description", "Due Date", "Status"]], use_container_width=True)
@@ -1366,7 +1310,6 @@ def show_my_tasks():
             selected_task_display = st.selectbox("Select Task to Update", options=task_options_display, key="select_task_to_update_volunteer")
             
             if selected_task_display:
-                # Find the original row in `my_tasks` dataframe using the unique identifier
                 selected_task_row = display_tasks[display_tasks.apply(lambda row: f"{row['Name']} - {row['Description']} (Due: {row['Due Date']})" == selected_task_display, axis=1)].iloc[0]
 
                 current_status = selected_task_row["Status"]
@@ -1385,7 +1328,7 @@ def show_my_tasks():
                     
                     if not idx_in_main_df.empty:
                         st.session_state.tasks_df.loc[idx_in_main_df, "Status"] = new_status
-                        google_db.save_dataframe("tasks", st.session_state.tasks_df) # Save to Google Sheet
+                        google_db.save_dataframe("tasks", st.session_state.tasks_df)
                         st.success(f"Status for '{selected_task_row['Description']}' updated to '{new_status}'. ✅")
                         st.rerun()
                     else:
@@ -1393,7 +1336,7 @@ def show_my_tasks():
 
 def show_update_availability():
     """Volunteer: Manage their availability status."""
-    global USERS # Declare global variable at the beginning of the function
+    global USERS
     st.title("📅 Update Availability")
     st.markdown("---")
     st.write(f"Manage your availability for volunteer assignments, {st.session_state.user_full_name}.")
@@ -1406,28 +1349,24 @@ def show_update_availability():
     new_availability = st.selectbox("Update your Availability", options=["Available", "Busy", "On Leave"], key="volunteer_availability_select")
     
     if st.button("Save Availability", key="save_availability_btn"):
-        # Update in the users_df
         user_idx = st.session_state.users_df[st.session_state.users_df["Username"] == st.session_state.username].index
         if not user_idx.empty:
             st.session_state.users_df.loc[user_idx, "Availability"] = new_availability
-            google_db.save_dataframe("users", st.session_state.users_df) # Save to Google Sheet
-            # Also update the global USERS dict for login
+            google_db.save_dataframe("users", st.session_state.users_df)
             USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
 
-        # Update in `volunteers_df` (which is used for coordinator assignment)
         volunteer_idx = st.session_state.volunteers_df[st.session_state.volunteers_df["Volunteer Username"] == st.session_state.username].index
         if not volunteer_idx.empty:
             st.session_state.volunteers_df.loc[volunteer_idx, "Availability"] = new_availability
-            google_db.save_dataframe("volunteers", st.session_state.volunteers_df) # Save to Google Sheet
+            google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
         else:
-            # If for some reason the volunteer isn't in volunteers_df, add them
             new_volunteer_entry = {
                 "Volunteer Username": st.session_state.username,
                 "Full Name": st.session_state.user_full_name,
                 "Availability": new_availability
             }
             st.session_state.volunteers_df = pd.concat([st.session_state.volunteers_df, pd.DataFrame([new_volunteer_entry])], ignore_index=True)
-            google_db.save_dataframe("volunteers", st.session_state.volunteers_df) # Save to Google Sheet
+            google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
 
         st.success(f"Your availability has been updated to: **{new_availability}** ✅")
         st.rerun()
@@ -1438,7 +1377,6 @@ def show_update_availability():
 st.sidebar.title("ERP Navigation 🌐")
 st.sidebar.markdown("---")
 
-# Authentication section in the sidebar
 if not st.session_state.logged_in:
     st.sidebar.subheader("Login 🔑")
     with st.sidebar.form("login_form"):
@@ -1448,7 +1386,6 @@ if not st.session_state.logged_in:
         if login_button:
             login(username, password)
     
-    # Display Home page content by default when not logged in
     current_accessible_pages = ROLE_PAGES.get("Public", ["Home"])
     st.session_state.current_page = st.sidebar.radio(
         "Go to",
@@ -1456,7 +1393,6 @@ if not st.session_state.logged_in:
         index=current_accessible_pages.index(st.session_state.current_page) if st.session_state.current_page in current_accessible_pages else 0,
         key="public_sidebar_navigation_radio"
     )
-    # Call the selected page function
     if st.session_state.current_page == "Home":
         home_page()
     elif st.session_state.current_page == "View Event Details":
@@ -1468,16 +1404,13 @@ if not st.session_state.logged_in:
         home_page()
 
 else:
-    # Display user info and logout button when logged in
     st.sidebar.write(f"Hello, **{st.session_state.user_full_name}**!")
     st.sidebar.write(f"Role: **{st.session_state.role}**")
     st.sidebar.button("Logout", on_click=logout, help="Click to securely log out of the system.")
     st.sidebar.markdown("---")
 
-    # Dynamic page selection based on role
     accessible_pages = ROLE_PAGES.get(st.session_state.role, ["Home"])
     
-    # Ensure current_page is still accessible, otherwise default to first accessible page
     if st.session_state.current_page not in accessible_pages:
         st.session_state.current_page = accessible_pages[0] if accessible_pages else "Home"
 
@@ -1485,11 +1418,10 @@ else:
         "Go to",
         accessible_pages,
         index=accessible_pages.index(st.session_state.current_page),
-        key="sidebar_navigation_radio" # Unique key for the widget
+        key="sidebar_navigation_radio"
     )
-    st.session_state.current_page = selected_page_from_radio # Update current_page in session state
+    st.session_state.current_page = selected_page_from_radio
 
-    # --- Display content based on selected page ---
     if st.session_state.current_page == "Home":
         home_page()
     elif st.session_state.current_page == "Announcements":

@@ -340,7 +340,7 @@ def send_email(recipient_email, subject, body):
                 server.starttls()
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, recipient_email, msg.as_string())
-        st.success(f'Email notification "{subject}" sent to {recipient_email}. 📧') 
+        st.success(f"Email notification "{subject}" sent to {recipient_email}. 📧') 
         print(f"--- EMAIL SENT TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END EMAIL ---") 
     except Exception as e:
         st.error(f"Failed to send email to {recipient_email}: {e}")

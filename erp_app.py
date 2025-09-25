@@ -12,6 +12,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.set_page_config(layout="wide", page_title="Inter-College Festive Event ERP")
 
 # --- Glassmorphism CSS (Injected at the start) ---
+# NOTE: Streamlit's internal CSS class names (like st-emotion-cache-vk33gh) are generated
+# and can change with Streamlit updates. If the styling breaks after an upgrade,
+# these selectors might need to be re-evaluated using your browser's developer tools.
 GLASSMORPHISM_CSS = """
 <style>
 /* Basic body styling */
@@ -145,14 +148,14 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 
 # --- Google Sheets Database Global Configuration ---
 # These are module-level global variables for GSheet connectivity status and client objects.
-# The cached function and GoogleSheetDB class will refer to these.
 _gspread_enabled = False
 _client = None
 _spreadsheet = None
-_spreadsheet_name_global = "users" # Default name, updated if GSheets enabled
+_spreadsheet_name_global = "Mock Sheet" # Default name, updated if GSheets enabled
 
 # Global mock data to be used when gspread is disabled or fails
 _global_mock_data = {}
+USERS = {} # Global dictionary for user lookup, will be populated from users_df
 
 # Helper to populate global mock data
 def _populate_global_mock_data_init():
@@ -202,7 +205,7 @@ def _populate_global_mock_data_init():
 try:
     if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
         _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
-        _scope = ['https://sheets.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'] # Adjusted scope for gspread
+        _scope = ['https://sheets.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         
         _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
         _client = gspread.authorize(_creds)
@@ -241,6 +244,7 @@ def _read_sheet_data_cached(gspread_is_enabled: bool, spreadsheet_name: str, she
             for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
                 if col in df.columns:
                     # Use errors='coerce' to turn unparseable dates into NaT (Not a Time)
+                    # and then convert to native Python date objects
                     df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
             return df
         except Exception as e:
@@ -288,7 +292,7 @@ class GoogleSheetDB:
                     raise ValueError("Google Sheets client not initialized for writing.")
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 worksheet.clear() # Clear existing content
-                # Convert datetime.date objects to string for gspread
+                # Convert datetime.date objects to string for gspread to avoid serialization issues
                 df_to_write = df.copy()
                 for col in ["Date", "Registration Date", "Due Date", "Date Posted", "Date Added"]:
                     if col in df_to_write.columns:
@@ -303,13 +307,20 @@ class GoogleSheetDB:
         
         _global_mock_data[sheet_name] = df # Update mock data regardless of gspread status
         st.cache_data.clear() # Clear cache for all sheets after a write (important!)
-        # st.rerun() # Re-run app to reflect changes immediately (careful with too many reruns)
+
 
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
     spreadsheet_name=_spreadsheet_name_global
 )
 
+# --- Helper to refresh the global USERS dictionary from session state ---
+def _refresh_users_global():
+    global USERS # Declare intent to modify global USERS
+    if "Username" in st.session_state.users_df.columns:
+        USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
+    else:
+        USERS = {}
 
 # --- Session State Initialization ---
 if "logged_in" not in st.session_state:
@@ -322,11 +333,7 @@ if "logged_in" not in st.session_state:
 # Load initial data from Google Sheets (or mock data) into session state
 if "users_df" not in st.session_state:
     st.session_state.users_df = google_db.read_sheet("users")
-    global USERS 
-    if "Username" in st.session_state.users_df.columns:
-        USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
-    else:
-        USERS = {}
+    _refresh_users_global() # Initialize USERS after loading users_df
 
 if "events_df" not in st.session_state:
     st.session_state.events_df = google_db.read_sheet("events")
@@ -358,11 +365,20 @@ ROLE_PAGES = {
 
 
 # --- Email Helper Function ---
-def send_email(recipient_email, subject, body):
+def send_email(recipient_username, subject, body):
     """
     Sends an email notification.
     Requires SMTP configuration in .streamlit/secrets.toml.
+    
+    NOTE: This implementation uses a dummy email address (username@example.com)
+    because the current user data structure doesn't include real email addresses.
+    For a production system, ensure your 'users' sheet has an 'Email' column
+    and update this function to retrieve the actual email.
     """
+    
+    # Construct dummy email for demonstration purposes
+    recipient_email = f"{recipient_username}@example.com" 
+
     if "smtp" not in st.secrets:
         st.warning(f"Email configuration not found in secrets. Email to '{recipient_email}' not sent.")
         print(f"--- MOCK EMAIL TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END MOCK EMAIL ---")
@@ -406,19 +422,37 @@ def logout():
 
 def login(username, password):
     """Authenticates the user and sets session state."""
-    if username in USERS and USERS[username]["Password"] == password:
-        st.session_state.logged_in = True
-        st.session_state.username = username
-        st.session_state.role = USERS[username]["Role"]
-        st.session_state.user_full_name = USERS[username]["Name"]
+    # Ensure USERS dictionary is up-to-date with the latest users_df.
+    # This is important for other parts of the app that might use USERS,
+    # like fetching full names for emails, and for the initial state of USERS
+    # if it hasn't been populated yet (e.g., if "users_df" was initially empty).
+    _refresh_users_global() 
+
+    # Robustly check credentials directly from st.session_state.users_df
+    if "users_df" in st.session_state and not st.session_state.users_df.empty:
+        user_row = st.session_state.users_df[st.session_state.users_df["Username"] == username]
         
-        accessible_pages_for_role = ROLE_PAGES.get(st.session_state.role, ["Home"])
-        st.session_state.current_page = accessible_pages_for_role[0] if accessible_pages_for_role else "Home"
-        
-        st.success(f"Welcome, {st.session_state.user_full_name} ({st.session_state.role})! 🎉")
-        st.rerun()
+        if not user_row.empty:
+            stored_password = user_row["Password"].iloc[0] # Get the password
+            
+            if stored_password == password:
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.session_state.role = user_row["Role"].iloc[0]
+                st.session_state.user_full_name = user_row["Name"].iloc[0]
+                
+                accessible_pages_for_role = ROLE_PAGES.get(st.session_state.role, ["Home"])
+                st.session_state.current_page = accessible_pages_for_role[0] if accessible_pages_for_role else "Home"
+                
+                st.success(f"Welcome, {st.session_state.user_full_name} ({st.session_state.role})! 🎉")
+                st.rerun()
+            else:
+                st.error("Invalid username or password 🚫")
+        else:
+            st.error("Invalid username or password 🚫") # Username not found
     else:
-        st.error("Invalid username or password 🚫")
+        st.error("User data not available. Please ensure the 'users' sheet is accessible or populated.")
+        print("DEBUG: User data not found in session state or is empty during login attempt.")
 
 # --- Page Content Functions ---
 
@@ -427,7 +461,7 @@ def home_page():
     st.title("🏛️ Inter-College Festive Event ERP")
     st.markdown("---")
     st.write("This system helps manage all aspects of our annual inter-college festive events, from planning and budgeting to registration and volunteer coordination.")
-    st.image("https://images.pexels.com/photos/357335/pexels-photo-357335.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1", caption="Festive Event", use_container_width=True)
+    st.image("https://images.pexels.com/photos/357335/pexels-photo-357335.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1", caption="Festive Event", use_column_width=True)
     st.markdown("---")
     if not st.session_state.logged_in:
         st.info("Please log in using the sidebar to access specific functionalities based on your role.")
@@ -465,7 +499,7 @@ def show_announcements():
                 announcement_content = st.text_area("Content")
                 target_role_options = ["All", "Admin", "Coordinator", "Participant", "Volunteer"]
                 if st.session_state.role == "Coordinator":
-                    target_role_options = ["All", "Coordinator", "Participant", "Volunteer"]
+                    target_role_options = ["All", "Coordinator", "Participant", "Volunteer"] # Coordinators can't target Admins
                 announcement_target = st.selectbox("Target Audience", options=target_role_options)
                 
                 submit_announcement = st.form_submit_button("Publish Announcement")
@@ -481,6 +515,7 @@ def show_announcements():
                             "Date Posted": datetime.date.today(),
                             "Target Role": announcement_target
                         }
+                        # Use pd.concat for adding new rows
                         st.session_state.announcements_df = pd.concat([st.session_state.announcements_df, pd.DataFrame([new_entry])], ignore_index=True)
                         google_db.save_dataframe("announcements", st.session_state.announcements_df)
                         st.success("Announcement published successfully! 🚀")
@@ -529,7 +564,6 @@ def show_admin_dashboard():
 
 def show_user_management():
     """Admin User Management: Add/view/edit users."""
-    global USERS 
     st.title("👤 User Management")
     st.markdown("---")
     st.write("Manage system users, their roles, and basic profiles.")
@@ -539,8 +573,11 @@ def show_user_management():
     if st.session_state.users_df.empty:
         st.info("No users in the system.")
     else:
+        # Create a copy for editing, excluding the password column
+        users_df_display = st.session_state.users_df.drop(columns=["Password"])
+        
         editable_users_df = st.data_editor(
-            st.session_state.users_df.drop(columns=["Password"]),
+            users_df_display,
             key="users_editor", 
             use_container_width=True,
             column_config={
@@ -548,16 +585,20 @@ def show_user_management():
                 "Availability": st.column_config.SelectboxColumn(options=["Available", "Busy", "On Leave", "N/A"])
             }
         )
-        if not editable_users_df.equals(st.session_state.users_df.drop(columns=["Password"])):
+        
+        # Check if changes were made to the editable part of the DataFrame
+        if not editable_users_df.equals(users_df_display):
+            # Apply changes back to the main DataFrame, preserving the password column
             temp_users_df = st.session_state.users_df.copy()
             for col in editable_users_df.columns:
-                if col in temp_users_df.columns:
+                if col in temp_users_df.columns: # Ensure the column exists in the original df
                     temp_users_df[col] = editable_users_df[col]
+            
             st.session_state.users_df = temp_users_df
             google_db.save_dataframe("users", st.session_state.users_df)
-            USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
+            _refresh_users_global() # Refresh global USERS dictionary
             st.success("User details updated successfully! ✅")
-            st.rerun()
+            st.rerun() # Rerun to reflect changes and potentially update sidebar
 
     st.subheader("Add New User ➕")
     with st.expander("Expand to Add New User"):
@@ -586,8 +627,7 @@ def show_user_management():
                         "Availability": "Available" if new_role == "Volunteer" else "N/A"
                     }
                     st.session_state.users_df = pd.concat([st.session_state.users_df, pd.DataFrame([new_user_entry])], ignore_index=True)
-                    google_db.save_dataframe("users", st.session_state.users_df)
-
+                    
                     if new_role == "Volunteer":
                         new_volunteer_profile = {
                             "Volunteer Username": new_username,
@@ -597,7 +637,8 @@ def show_user_management():
                         st.session_state.volunteers_df = pd.concat([st.session_state.volunteers_df, pd.DataFrame([new_volunteer_profile])], ignore_index=True)
                         google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
 
-                    USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
+                    google_db.save_dataframe("users", st.session_state.users_df)
+                    _refresh_users_global() # Refresh global USERS dictionary
                     st.success(f"User '{new_username}' added with role '{new_role}'. ✅")
                     st.rerun() 
 
@@ -758,6 +799,7 @@ def show_budget_overview():
         st.info("No events with budget data.")
     else:
         st.dataframe(st.session_state.events_df[["Event ID", "Name", "Budget", "Status"]], use_container_width=True)
+        # Ensure 'Name' is set as index before charting
         st.bar_chart(st.session_state.events_df.set_index("Name")["Budget"])
 
     st.subheader("Overall Expenses (Dummy Data) 📉")
@@ -791,6 +833,7 @@ def show_reports():
             participation_counts = st.session_state.registrations_df.groupby("Event ID").size().reset_index(name="Participants")
             participation_merged = pd.merge(participation_counts, st.session_state.events_df[["Event ID", "Name"]], on="Event ID", how="left")
             st.dataframe(participation_merged.sort_values("Participants", ascending=False), use_container_width=True)
+            # Ensure 'Name' is set as index before charting
             st.bar_chart(participation_merged.set_index("Name")["Participants"])
 
     elif report_type == "Budget vs Actual":
@@ -806,6 +849,7 @@ def show_reports():
         budget_vs_actual = pd.merge(st.session_state.events_df[["Event ID", "Name", "Budget"]], event_expenses, on="Event ID", how="left").fillna(0)
         budget_vs_actual["Variance"] = budget_vs_actual["Budget"] - budget_vs_actual["Actual Expenses"]
         st.dataframe(budget_vs_actual, use_container_width=True)
+        # Ensure 'Name' is set as index before charting
         st.bar_chart(budget_vs_actual.set_index("Name")[["Budget", "Actual Expenses"]])
 
     elif report_type == "Volunteer Engagement":
@@ -816,6 +860,7 @@ def show_reports():
             volunteer_tasks_counts = st.session_state.tasks_df.groupby("Assigned To Volunteer Username").size().reset_index(name="Assigned Tasks")
             volunteer_tasks_merged = pd.merge(volunteer_tasks_counts, st.session_state.volunteers_df[["Volunteer Username", "Full Name"]], on="Volunteer Username", how="left")
             st.dataframe(volunteer_tasks_merged, use_container_width=True)
+            # Ensure 'Full Name' is set as index before charting
             st.bar_chart(volunteer_tasks_merged.set_index("Full Name")["Assigned Tasks"])
     
     elif report_type == "Sponsor Contribution":
@@ -824,6 +869,7 @@ def show_reports():
             st.info("No sponsors to report on.")
         else:
             st.dataframe(st.session_state.sponsors_df[["Name", "Tier", "Contribution Amount", "Contact Person"]], use_container_width=True)
+            # Ensure 'Name' is set as index before charting
             st.bar_chart(st.session_state.sponsors_df.set_index("Name")["Contribution Amount"])
 
 
@@ -841,10 +887,14 @@ def show_my_events():
 
         st.subheader("Update Event Status 🔄")
         with st.expander("Update Status for an Event"):
-            event_to_update_id = st.selectbox("Select Event to Update", 
-                                              options=my_events["Event ID"].tolist(), 
-                                              format_func=lambda x: my_events[my_events["Event ID"] == x]["Name"].iloc[0] if not my_events.empty else x,
-                                              key="update_my_event_status_select")
+            # Robust format_func for selectbox
+            event_options = my_events["Event ID"].tolist()
+            event_to_update_id = st.selectbox(
+                "Select Event to Update", 
+                options=event_options, 
+                format_func=lambda x: my_events[my_events["Event ID"] == x]["Name"].iloc[0] if not my_events.empty and x in my_events["Event ID"].values else x,
+                key="update_my_event_status_select"
+            )
             
             if event_to_update_id:
                 current_status = st.session_state.events_df[st.session_state.events_df["Event ID"] == event_to_update_id]["Status"].iloc[0]
@@ -872,10 +922,14 @@ def show_event_task_management():
         st.info("You are not coordinating any events to manage tasks for.")
         return
 
-    selected_event_id = st.selectbox("Select Event", 
-                                      options=my_events_df["Event ID"].tolist(),
-                                      format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if not my_events_df.empty else x,
-                                      key="select_event_for_task_management")
+    # Robust format_func for selectbox
+    event_options = my_events_df["Event ID"].tolist()
+    selected_event_id = st.selectbox(
+        "Select Event", 
+        options=event_options,
+        format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if not my_events_df.empty and x in my_events_df["Event ID"].values else x,
+        key="select_event_for_task_management"
+    )
 
     if selected_event_id:
         event_name = my_events_df[my_events_df["Event ID"] == selected_event_id]["Name"].iloc[0]
@@ -895,8 +949,9 @@ def show_event_task_management():
                     "Status": st.column_config.SelectboxColumn(options=["Assigned", "Pending", "In Progress", "Completed"])
                 }
             )
+            # Check if changes were made by the data_editor
             if not editable_tasks_df.equals(current_event_tasks):
-                st.session_state.tasks_df = editable_tasks_df
+                st.session_state.tasks_df = editable_tasks_df # Direct assignment is fine as all cols are present
                 google_db.save_dataframe("tasks", st.session_state.tasks_df)
                 st.success("Tasks updated successfully! ✅")
                 st.rerun()
@@ -930,12 +985,11 @@ def show_event_task_management():
                         st.success(f"Task '{task_description}' added to '{event_name}'! ✅")
 
                         if assigned_to_volunteer:
-                            volunteer_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_to_volunteer]
-                            if not volunteer_email_row.empty:
-                                dummy_volunteer_email = f"{assigned_to_volunteer}@example.com" 
-                                email_subject = f"New Task Assignment for {event_name}"
-                                email_body = f"Hello {USERS[assigned_to_volunteer]['Name']},\n\nYou have been assigned a new task for '{event_name}':\n\nTask: {task_description}\nDue Date: {due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
-                                send_email(dummy_volunteer_email, email_subject, email_body)
+                            # Use the global USERS dictionary for full name
+                            volunteer_full_name = USERS.get(assigned_to_volunteer, {}).get("Name", assigned_to_volunteer)
+                            email_subject = f"New Task Assignment for {event_name}"
+                            email_body = f"Hello {volunteer_full_name},\n\nYou have been assigned a new task for '{event_name}':\n\nTask: {task_description}\nDue Date: {due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
+                            send_email(assigned_to_volunteer, email_subject, email_body)
                         st.rerun()
                     else:
                         st.error("Task description cannot be empty.")
@@ -952,9 +1006,14 @@ def show_volunteer_assignment():
         st.info("You are not coordinating any events to assign volunteers to.")
         return
 
-    selected_event_id = st.selectbox("Select Event", options=my_events_df["Event ID"].tolist(),
-                                      format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if not my_events_df.empty else x,
-                                      key="select_event_for_volunteer_assignment")
+    # Robust format_func for selectbox
+    event_options = my_events_df["Event ID"].tolist()
+    selected_event_id = st.selectbox(
+        "Select Event", 
+        options=event_options,
+        format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if not my_events_df.empty and x in my_events_df["Event ID"].values else x,
+        key="select_event_for_volunteer_assignment"
+    )
 
     if selected_event_id:
         st.subheader(f"Volunteers and Tasks for {my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}")
@@ -997,12 +1056,14 @@ def show_volunteer_assignment():
                                     google_db.save_dataframe("tasks", st.session_state.tasks_df)
                                     st.success(f"Task '{selected_task_description}' assigned to '{assigned_volunteer}'. ✅")
                                     
-                                    volunteer_user_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_volunteer]
-                                    if not volunteer_user_row.empty:
-                                        dummy_volunteer_email = f"{assigned_volunteer}@example.com"
-                                        email_subject = f"Your Task Assignment for {my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}"
-                                        email_body = f"Hello {USERS[assigned_volunteer]['Name']},\n\nYou have been assigned a task for '{my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}':\n\nTask: {selected_task_description}\nDue Date: {st.session_state.tasks_df.loc[task_idx, 'Due Date'].iloc[0]}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
-                                        send_email(dummy_volunteer_email, email_subject, email_body)
+                                    # Send email notification
+                                    volunteer_full_name = USERS.get(assigned_volunteer, {}).get("Name", assigned_volunteer)
+                                    event_name_for_email = my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]
+                                    task_due_date = st.session_state.tasks_df.loc[task_idx, 'Due Date'].iloc[0]
+
+                                    email_subject = f"Your Task Assignment for {event_name_for_email}"
+                                    email_body = f"Hello {volunteer_full_name},\n\nYou have been assigned a task for '{event_name_for_email}':\n\nTask: {selected_task_description}\nDue Date: {task_due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
+                                    send_email(assigned_volunteer, email_subject, email_body)
                                 else:
                                     st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"] = None
                                     st.session_state.tasks_df.loc[task_idx, "Status"] = "Pending"
@@ -1027,9 +1088,14 @@ def show_event_budget_tracking():
         st.info("You are not coordinating any events to track budget for.")
         return
 
-    selected_event_id = st.selectbox("Select Event", options=my_events_df["Event ID"].tolist(),
-                                      format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0],
-                                      key="budget_tracking_event_select")
+    # Robust format_func for selectbox
+    event_options = my_events_df["Event ID"].tolist()
+    selected_event_id = st.selectbox(
+        "Select Event", 
+        options=event_options,
+        format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if not my_events_df.empty and x in my_events_df["Event ID"].values else x,
+        key="budget_tracking_event_select"
+    )
 
     if selected_event_id:
         event_info = my_events_df[my_events_df["Event ID"] == selected_event_id].iloc[0]
@@ -1098,8 +1164,11 @@ def show_communication_hub():
         with st.form("send_message_form"):
             my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name]
             event_options = [""] + my_events_df["Event ID"].tolist()
-            target_event_id = st.selectbox("Select Event (Optional, for event-specific message)", options=event_options,
-                                           format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if x else "General")
+            target_event_id = st.selectbox(
+                "Select Event (Optional, for event-specific message)", 
+                options=event_options,
+                format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if x and not my_events_df.empty and x in my_events_df["Event ID"].values else "General"
+            )
             
             message_subject = st.text_input("Subject")
             message_content = st.text_area("Message Content")
@@ -1126,17 +1195,21 @@ def show_view_event_details():
     filtered_events = st.session_state.events_df
     if search_query:
         filtered_events = filtered_events[
-            filtered_events["Name"].str.contains(search_query, case=False) |
-            filtered_events["Location"].str.contains(search_query, case=False)
+            filtered_events["Name"].str.contains(search_query, case=False, na=False) |
+            filtered_events["Location"].str.contains(search_query, case=False, na=False)
         ]
 
     if filtered_events.empty:
         st.info("No events found matching your search criteria.")
     else:
-        selected_event_id = st.selectbox("Select an Event to view details", 
-                                        options=filtered_events["Event ID"].tolist(),
-                                        format_func=lambda x: filtered_events[filtered_events["Event ID"] == x]["Name"].iloc[0] if not filtered_events.empty else x,
-                                        key="view_event_details_select")
+        # Robust format_func for selectbox
+        event_options = filtered_events["Event ID"].tolist()
+        selected_event_id = st.selectbox(
+            "Select an Event to view details", 
+            options=event_options,
+            format_func=lambda x: filtered_events[filtered_events["Event ID"] == x]["Name"].iloc[0] if not filtered_events.empty and x in filtered_events["Event ID"].values else x,
+            key="view_event_details_select"
+        )
         
         if selected_event_id:
             event_details = filtered_events[filtered_events["Event ID"] == selected_event_id].iloc[0]
@@ -1189,8 +1262,8 @@ def show_register_for_events():
     
     if search_query:
         upcoming_events = upcoming_events[
-            upcoming_events["Name"].str.contains(search_query, case=False) |
-            upcoming_events["Location"].str.contains(search_query, case=False)
+            upcoming_events["Name"].str.contains(search_query, case=False, na=False) |
+            upcoming_events["Location"].str.contains(search_query, case=False, na=False)
         ]
 
     if upcoming_events.empty:
@@ -1203,10 +1276,14 @@ def show_register_for_events():
     st.subheader("Register for an Event ✨")
     with st.expander("Register for Selected Event"):
         with st.form("event_registration_form"):
-            event_to_register_id = st.selectbox("Select Event to Register For", 
-                                                options=upcoming_events["Event ID"].tolist(), 
-                                                format_func=lambda x: upcoming_events[upcoming_events["Event ID"] == x]["Name"].iloc[0] if not upcoming_events.empty else x,
-                                                key="register_event_select")
+            # Robust format_func for selectbox
+            event_options = upcoming_events["Event ID"].tolist()
+            event_to_register_id = st.selectbox(
+                "Select Event to Register For", 
+                options=event_options, 
+                format_func=lambda x: upcoming_events[upcoming_events["Event ID"] == x]["Name"].iloc[0] if not upcoming_events.empty and x in upcoming_events["Event ID"].values else x,
+                key="register_event_select"
+            )
             
             register_button = st.form_submit_button("Register Now")
 
@@ -1230,12 +1307,14 @@ def show_register_for_events():
                         event_name = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Name'].iloc[0]
                         st.success(f"Successfully registered for event '{event_name}'! 🎉")
 
-                        participant_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == st.session_state.username]
-                        if not participant_email_row.empty:
-                            dummy_participant_email = f"{st.session_state.username}@example.com"
-                            email_subject = f"Registration Confirmation for {event_name}"
-                            email_body = f"Hello {st.session_state.user_full_name},\n\nThis is to confirm your registration for '{event_name}'.\n\nEvent Date: {upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Date'].iloc[0]}\nEvent Location: {upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Location'].iloc[0]}\n\nWe look forward to seeing you there!\n\nRegards,\nFestive Event Team"
-                            send_email(dummy_participant_email, email_subject, email_body)
+                        # Send email confirmation
+                        participant_full_name = st.session_state.user_full_name # Get current user's full name
+                        event_date = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Date'].iloc[0]
+                        event_location = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Location'].iloc[0]
+
+                        email_subject = f"Registration Confirmation for {event_name}"
+                        email_body = f"Hello {participant_full_name},\n\nThis is to confirm your registration for '{event_name}'.\n\nEvent Date: {event_date}\nEvent Location: {event_location}\n\nWe look forward to seeing you there!\n\nRegards,\nFestive Event Team"
+                        send_email(st.session_state.username, email_subject, email_body)
                         st.rerun()
                 else:
                     st.error("Please select an event to register.")
@@ -1262,13 +1341,18 @@ def show_my_registrations():
         if events_for_cancellation.empty:
             st.info("No upcoming events to cancel registration for.")
         else:
-            event_to_cancel_id = st.selectbox("Select Event to Cancel Registration For", 
-                                            options=events_for_cancellation["Event ID"].tolist(), 
-                                            format_func=lambda x: events_for_cancellation[events_for_cancellation["Event ID"] == x]["Name"].iloc[0],
-                                            key="cancel_registration_select")
+            # Robust format_func for selectbox
+            event_options = events_for_cancellation["Event ID"].tolist()
+            event_to_cancel_id = st.selectbox(
+                "Select Event to Cancel Registration For", 
+                options=event_options, 
+                format_func=lambda x: events_for_cancellation[events_for_cancellation["Event ID"] == x]["Name"].iloc[0] if not events_for_cancellation.empty and x in events_for_cancellation["Event ID"].values else x,
+                key="cancel_registration_select"
+            )
             
             if event_to_cancel_id:
-                st.warning(f"Are you sure you want to cancel your registration for '{events_for_cancellation[events_for_cancellation['Event ID'] == event_to_cancel_id]['Name'].iloc[0]}'?")
+                event_name_to_cancel = events_for_cancellation[events_for_cancellation['Event ID'] == event_to_cancel_id]['Name'].iloc[0]
+                st.warning(f"Are you sure you want to cancel your registration for '{event_name_to_cancel}'?")
                 col_y, col_n = st.columns(2)
                 with col_y:
                     confirm_cancel = st.button("Yes, Cancel Registration", key="confirm_cancel_btn")
@@ -1281,7 +1365,7 @@ def show_my_registrations():
                           (st.session_state.registrations_df["Event ID"] == event_to_cancel_id))
                     ]
                     google_db.save_dataframe("registrations", st.session_state.registrations_df)
-                    st.success(f"Registration for '{events_for_cancellation[events_for_cancellation['Event ID'] == event_to_cancel_id]['Name'].iloc[0]}' cancelled successfully. 👋")
+                    st.success(f"Registration for '{event_name_to_cancel}' cancelled successfully. 👋")
                     st.rerun()
             else:
                 st.info("Please select an event to cancel registration.")
@@ -1310,6 +1394,7 @@ def show_my_tasks():
             selected_task_display = st.selectbox("Select Task to Update", options=task_options_display, key="select_task_to_update_volunteer")
             
             if selected_task_display:
+                # Find the corresponding task row from the display_tasks DataFrame
                 selected_task_row = display_tasks[display_tasks.apply(lambda row: f"{row['Name']} - {row['Description']} (Due: {row['Due Date']})" == selected_task_display, axis=1)].iloc[0]
 
                 current_status = selected_task_row["Status"]
@@ -1322,6 +1407,7 @@ def show_my_tasks():
                 
                 if st.button(f"Update Status for '{selected_task_row['Description']}' in '{selected_task_row['Name']}'", 
                              key=f"update_task_btn_{selected_task_row['Task ID']}"):
+                    # Find the index in the original tasks_df for modification
                     idx_in_main_df = st.session_state.tasks_df[
                         (st.session_state.tasks_df["Task ID"] == selected_task_row["Task ID"])
                     ].index
@@ -1336,7 +1422,6 @@ def show_my_tasks():
 
 def show_update_availability():
     """Volunteer: Manage their availability status."""
-    global USERS
     st.title("📅 Update Availability")
     st.markdown("---")
     st.write(f"Manage your availability for volunteer assignments, {st.session_state.user_full_name}.")
@@ -1353,21 +1438,22 @@ def show_update_availability():
         if not user_idx.empty:
             st.session_state.users_df.loc[user_idx, "Availability"] = new_availability
             google_db.save_dataframe("users", st.session_state.users_df)
-            USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
+            _refresh_users_global() # Refresh global USERS dictionary
 
+        # Ensure volunteer entry exists in volunteers_df, create if not
         volunteer_idx = st.session_state.volunteers_df[st.session_state.volunteers_df["Volunteer Username"] == st.session_state.username].index
         if not volunteer_idx.empty:
             st.session_state.volunteers_df.loc[volunteer_idx, "Availability"] = new_availability
-            google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
         else:
+            # If a user is manually changed to Volunteer role, or data is inconsistent, add them here
             new_volunteer_entry = {
                 "Volunteer Username": st.session_state.username,
                 "Full Name": st.session_state.user_full_name,
                 "Availability": new_availability
             }
             st.session_state.volunteers_df = pd.concat([st.session_state.volunteers_df, pd.DataFrame([new_volunteer_entry])], ignore_index=True)
-            google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
-
+            
+        google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
         st.success(f"Your availability has been updated to: **{new_availability}** ✅")
         st.rerun()
 
@@ -1401,8 +1487,7 @@ if not st.session_state.logged_in:
         show_announcements()
     else:
         st.error("Page not found or not accessible for public role.")
-        home_page()
-
+        home_page() # Fallback to home page if invalid page is selected
 else:
     st.sidebar.write(f"Hello, **{st.session_state.user_full_name}**!")
     st.sidebar.write(f"Role: **{st.session_state.role}**")
@@ -1411,6 +1496,7 @@ else:
 
     accessible_pages = ROLE_PAGES.get(st.session_state.role, ["Home"])
     
+    # Ensure current_page is always an accessible page for the current role
     if st.session_state.current_page not in accessible_pages:
         st.session_state.current_page = accessible_pages[0] if accessible_pages else "Home"
 
@@ -1422,6 +1508,7 @@ else:
     )
     st.session_state.current_page = selected_page_from_radio
 
+    # Routing based on the selected page
     if st.session_state.current_page == "Home":
         home_page()
     elif st.session_state.current_page == "Announcements":

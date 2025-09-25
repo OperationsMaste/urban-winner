@@ -3,7 +3,7 @@ import pandas as pd
 import time # For simulating network latency
 
 class GoogleSheetDB:
-    def __init__(self, sheet_id="11IEx5m5zLjn3OfXN5Man7gZ04YicktFj5kgh15EjKtQ", credentials_path="path/to/your/credentials.json"):
+    def __init__(self, sheet_id="11IEx5m5zLjn3OfXN5Man7gZ04YicktFj5kgh15EjKtQ", credentials_path="credentials.json"):
         """
         Initializes the GoogleSheetDB.
         In a real application, this would set up gspread client, authenticate, etc.

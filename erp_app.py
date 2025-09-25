@@ -4,6 +4,7 @@ import datetime
 import json
 import smtplib
 from email.mime.text import MIMEText
+import os # Import os to access environment variables
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -151,7 +152,7 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 _gspread_enabled = False
 _client = None
 _spreadsheet = None
-_spreadsheet_name_global = "Mock Sheet" # Default name, updated if GSheets enabled
+_spreadsheet_id_global = None # Changed to ID for robustness
 
 # Global mock data to be used when gspread is disabled or fails
 _global_mock_data = {}
@@ -201,29 +202,39 @@ def _populate_global_mock_data_init():
         ])
     }
 
-# Attempt to initialize Google Sheets client
+# --- HARDCORE GOOGLE SHEETS CONFIGURATION ---
+# Attempt to initialize Google Sheets client using Environment Variables
 try:
-    if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
-        _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
-        _scope = ['https://sheets.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        
-        _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
-        _client = gspread.authorize(_creds)
-        _spreadsheet_name_global = st.secrets.google_sheets.spreadsheet_name
-        _spreadsheet = _client.open(_spreadsheet_name_global)
-        _gspread_enabled = True
-        st.success("Google Sheets integration enabled. ✅")
-    else:
-        st.warning("Google Sheets secrets not found. Running with in-memory data. Please configure `secrets.toml`.")
-        _populate_global_mock_data_init() # Initialize mock data if GSheets is disabled
-except Exception as e:
-    st.error(f"Error initializing Google Sheets: {e}. Running with in-memory data.")
+    gcp_service_account_key_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
+    google_spreadsheet_id = os.environ.get("GOOGLE_SPREADSHEET_ID")
+    
+    if not gcp_service_account_key_json:
+        raise ValueError("Environment variable 'GOOGLE_SERVICE_ACCOUNT_KEY' not found.")
+    
+    if not google_spreadsheet_id:
+        raise ValueError("Environment variable 'GOOGLE_SPREADSHEET_ID' not found.")
+
+    _creds_json = json.loads(gcp_service_account_key_json)
+    _scope = ['https://sheets.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+    
+    _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
+    _client = gspread.authorize(_creds)
+    _spreadsheet_id_global = google_spreadsheet_id # Store the ID globally
+    _spreadsheet = _client.open_by_key(_spreadsheet_id_global) # Open by ID for robustness
+    _gspread_enabled = True
+    st.success(f"Google Sheets integration enabled. ✅ Spreadsheet ID: {_spreadsheet_id_global}")
+except ValueError as ve:
+    st.error(f"Google Sheets configuration error: {ve}. Please ensure environment variables are set correctly.")
     _gspread_enabled = False
-    _populate_global_mock_data_init() # Initialize mock data if GSheets fails
+    _populate_global_mock_data_init()
+except Exception as e:
+    st.error(f"Error initializing Google Sheets client: {e}. Running with in-memory data.")
+    _gspread_enabled = False
+    _populate_global_mock_data_init()
 
 # --- Global Cached Function for Reading Sheets ---
 @st.cache_data(ttl=300) # Cache sheet data for 5 minutes
-def _read_sheet_data_cached(gspread_is_enabled: bool, spreadsheet_name: str, sheet_name: str) -> pd.DataFrame:
+def _read_sheet_data_cached(gspread_is_enabled: bool, spreadsheet_id: str, sheet_name: str) -> pd.DataFrame:
     """
     Helper function to read a sheet with caching. It explicitly takes hashable arguments.
     It uses the global _spreadsheet object and _global_mock_data.
@@ -274,13 +285,14 @@ class GoogleSheetDB:
     This version delegates reading to a globally cached function and
     writes directly to global state/gspread client.
     """
-    def __init__(self, spreadsheet_name):
-        self._spreadsheet_name = spreadsheet_name
+    def __init__(self, spreadsheet_id): # Initialize with ID
+        self._spreadsheet_id = spreadsheet_id
 
     def read_sheet(self, sheet_name):
         """Reads data from a specified worksheet, using the global cached function."""
-        # Pass current global _gspread_enabled and _spreadsheet_name_global to the cached function
-        return _read_sheet_data_cached(_gspread_enabled, _spreadsheet_name_global, sheet_name)
+        # Pass current global _gspread_enabled and _spreadsheet_id_global to the cached function
+        # Note: The spreadsheet_id is now passed as a cache key, not the name.
+        return _read_sheet_data_cached(_gspread_enabled, self._spreadsheet_id, sheet_name)
 
     def save_dataframe(self, sheet_name, df):
         """Saves a DataFrame to a worksheet and updates global mock data."""
@@ -310,8 +322,9 @@ class GoogleSheetDB:
 
 
 # Initialize Google Sheet DB client
+# Pass the global ID if GSheets is enabled, otherwise a placeholder (it won't be used)
 google_db = GoogleSheetDB(
-    spreadsheet_name=_spreadsheet_name_global
+    spreadsheet_id=_spreadsheet_id_global if _gspread_enabled else "mock_spreadsheet_id"
 )
 
 # --- Helper to refresh the global USERS dictionary from session state ---
@@ -368,7 +381,7 @@ ROLE_PAGES = {
 def send_email(recipient_username, subject, body):
     """
     Sends an email notification.
-    Requires SMTP configuration in .streamlit/secrets.toml.
+    Requires SMTP configuration in .streamlit/secrets.toml (or similar environment vars).
     
     NOTE: This implementation uses a dummy email address (username@example.com)
     because the current user data structure doesn't include real email addresses.
@@ -379,6 +392,8 @@ def send_email(recipient_username, subject, body):
     # Construct dummy email for demonstration purposes
     recipient_email = f"{recipient_username}@example.com" 
 
+    # For email, we'll still use st.secrets for simplicity, as it's a separate concern
+    # and not part of the "Google Sheets hardcore" request.
     if "smtp" not in st.secrets:
         st.warning(f"Email configuration not found in secrets. Email to '{recipient_email}' not sent.")
         print(f"--- MOCK EMAIL TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END MOCK EMAIL ---")

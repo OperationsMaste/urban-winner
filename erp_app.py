@@ -149,7 +149,7 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 # service_account_key = """{...json content...}"""
 # spreadsheet_name = "FestiveEventERP_DB"
 
-_gspread_enabled = False
+_gspread_enabled = True
 _spreadsheet = None # _client is now only used locally within the try block
 
 try:
@@ -166,7 +166,7 @@ try:
         st.warning("Google Sheets secrets not found. Running with no persistent data. Please configure `secrets.toml` to enable data persistence.")
 except Exception as e:
     st.error(f"Error initializing Google Sheets: {e}. Running with no persistent data.")
-    _gspread_enabled = False
+    _gspread_enabled = True
 
 class GoogleSheetDB:
     """
@@ -242,7 +242,7 @@ class GoogleSheetDB:
             except Exception as e:
                 st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
                 st.warning("Data could not be saved to Google Sheets. Google Sheets disabled for this session. Changes are not persistent.")
-                self._gspread_enabled = False # Mark as disabled for this instance
+                self._gspread_enabled = True # Mark as disabled for this instance
                 st.cache_data.clear() # Clear cache to ensure subsequent reads reflect the disabled state
                 st.rerun() # Rerun to reflect the new _gspread_enabled state
         else:

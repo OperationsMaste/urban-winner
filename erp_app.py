@@ -165,7 +165,7 @@ try:
     else:
         st.warning("Google Sheets secrets not found. Running with no persistent data. Please configure `secrets.toml` to enable data persistence.")
 except Exception as e:
-    st.error(f"Error initializing Google Sheets: {e}. Running with no persistent data.")
+    st.error("Error initializing Google Sheets: {e}. Running with no persistent data.")
     _gspread_enabled = False
 
 class GoogleSheetDB:

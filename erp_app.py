@@ -4,7 +4,7 @@ import datetime
 import json
 import smtplib
 from email.mime.text import MIMEText
-import os # Import os to access environment variables
+# import os # No longer directly using os.environ for these specific secrets
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -13,9 +13,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.set_page_config(layout="wide", page_title="Inter-College Festive Event ERP")
 
 # --- Glassmorphism CSS (Injected at the start) ---
-# NOTE: Streamlit's internal CSS class names (like st-emotion-cache-vk33gh) are generated
-# and can change with Streamlit updates. If the styling breaks after an upgrade,
-# these selectors might need to be re-evaluated using your browser's developer tools.
+# ... (Your existing GLASSMORPHISM_CSS code remains here) ...
 GLASSMORPHISM_CSS = """
 <style>
 /* Basic body styling */
@@ -203,28 +201,34 @@ def _populate_global_mock_data_init():
     }
 
 # --- HARDCORE GOOGLE SHEETS CONFIGURATION ---
-# Attempt to initialize Google Sheets client using Environment Variables
+# Attempt to initialize Google Sheets client using st.secrets
 try:
-    gcp_service_account_key_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
-    google_spreadsheet_id = os.environ.get("GOOGLE_SPREADSHEET_ID")
+    # Use st.secrets instead of os.environ
+    # st.secrets.google will be a dictionary-like object if [google] is a TOML table
+    _creds_json_dict = st.secrets.google.to_dict() # Convert to a regular Python dict
+    google_spreadsheet_id = st.secrets.google.spreadsheet_id
     
-    if not gcp_service_account_key_json:
-        raise ValueError("Environment variable 'GOOGLE_SERVICE_ACCOUNT_KEY' not found.")
+    if not _creds_json_dict:
+        raise ValueError("Streamlit secret 'google' section (service account key) not found or empty.")
     
     if not google_spreadsheet_id:
-        raise ValueError("Environment variable 'GOOGLE_SPREADSHEET_ID' not found.")
+        raise ValueError("Streamlit secret 'google.spreadsheet_id' not found.")
 
-    _creds_json = json.loads(gcp_service_account_key_json)
     _scope = ['https://sheets.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     
-    _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
+    # Pass the dictionary directly to from_json_keyfile_dict
+    _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json_dict, _scope)
     _client = gspread.authorize(_creds)
     _spreadsheet_id_global = google_spreadsheet_id # Store the ID globally
     _spreadsheet = _client.open_by_key(_spreadsheet_id_global) # Open by ID for robustness
     _gspread_enabled = True
     st.success(f"Google Sheets integration enabled. ✅ Spreadsheet ID: {_spreadsheet_id_global}")
+except KeyError as ke: # Catch KeyError specifically for missing secrets keys
+    st.error(f"Google Sheets configuration error: Missing secret key '{ke}'. Please ensure .streamlit/secrets.toml is set up correctly in the [google] section.")
+    _gspread_enabled = False
+    _populate_global_mock_data_init()
 except ValueError as ve:
-    st.error(f"Google Sheets configuration error: {ve}. Please ensure environment variables are set correctly.")
+    st.error(f"Google Sheets configuration error: {ve}. Please ensure secrets are set correctly (e.g., spreadsheet ID exists).")
     _gspread_enabled = False
     _populate_global_mock_data_init()
 except Exception as e:
@@ -381,7 +385,7 @@ ROLE_PAGES = {
 def send_email(recipient_username, subject, body):
     """
     Sends an email notification.
-    Requires SMTP configuration in .streamlit/secrets.toml (or similar environment vars).
+    Requires SMTP configuration in .streamlit/secrets.toml.
     
     NOTE: This implementation uses a dummy email address (username@example.com)
     because the current user data structure doesn't include real email addresses.
@@ -392,13 +396,13 @@ def send_email(recipient_username, subject, body):
     # Construct dummy email for demonstration purposes
     recipient_email = f"{recipient_username}@example.com" 
 
-    # For email, we'll still use st.secrets for simplicity, as it's a separate concern
-    # and not part of the "Google Sheets hardcore" request.
+    # Check if SMTP configuration exists in secrets
     if "smtp" not in st.secrets:
         st.warning(f"Email configuration not found in secrets. Email to '{recipient_email}' not sent.")
         print(f"--- MOCK EMAIL TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END MOCK EMAIL ---")
         return
     
+    # Use st.secrets for SMTP credentials
     sender_email = st.secrets.smtp.email_sender
     sender_password = st.secrets.smtp.email_password
     smtp_server = st.secrets.smtp.smtp_server

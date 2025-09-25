@@ -10,13 +10,13 @@ from email.mime.text import MIMEText
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ... (rest of your imports and configurations) ...
-
 # --- Configuration ---
 st.set_page_config(layout="wide", page_title="Inter-College Festive Event ERP")
 
 # --- Glassmorphism CSS (Injected at the start) ---
-# ... (Glassmorphism CSS code) ...
+# This CSS attempts to target common Streamlit elements for a Glassmorphism effect.
+# You may need to inspect your browser's dev tools to fine-tune selectors and properties
+# if you add more custom components or Streamlit updates its DOM structure.
 GLASSMORPHISM_CSS = """
 <style>
 /* Basic body styling */
@@ -156,12 +156,14 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 
 try:
     # Attempt to load gspread client if secrets are available
-    # These imports are here to allow the app to run in "mock mode" without gspread installed or configured.
     _gspread_enabled = False
+    _client = None
+    _spreadsheet = None
+
     if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
         _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
         _scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        # This block will be uncommented and used with actual gspread
+        
         _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
         _client = gspread.authorize(_creds)
         _spreadsheet = _client.open(st.secrets.google_sheets.spreadsheet_name)
@@ -258,7 +260,6 @@ class GoogleSheetDB:
         """Helper to read a sheet with caching."""
         st.info(f"Loading data for '{sheet_name}' from {'Google Sheets' if _self._gspread_enabled else 'in-memory mock'}...")
         if _self._gspread_enabled:
-            # Uncomment this block for actual gspread integration
             try:
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 data = worksheet.get_all_records()
@@ -284,7 +285,6 @@ class GoogleSheetDB:
     def _write_sheet(self, sheet_name, df):
         """Helper to write data to a sheet (no caching)."""
         if self._gspread_enabled:
-            # Uncomment this block for actual gspread integration
             try:
                 worksheet = _spreadsheet.worksheet(sheet_name)
                 worksheet.clear() # Clear existing content
@@ -299,8 +299,7 @@ class GoogleSheetDB:
                 st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
                 st.warning("Data saved to in-memory mock only.")
                 self._gspread_enabled = False # Temporarily disable gspread
-            pass # In mock mode, we just update mock_data
-        
+            
         self.mock_data[sheet_name] = df # Update mock data regardless
         st.cache_data.clear() # Clear cache for all sheets after a write
         # st.rerun() # Re-run app to reflect changes immediately (careful with too many reruns)
@@ -312,7 +311,7 @@ class GoogleSheetDB:
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
     spreadsheet_name=st.secrets.google_sheets.spreadsheet_name if _gspread_enabled else "Mock Sheet",
-    client=_client if _gspread_enabled else None, # Pass _client if gspread is enabled
+    client=_client if _gspread_enabled else None, 
     gspread_enabled=_gspread_enabled
 )
 
@@ -332,7 +331,7 @@ if "users_df" not in st.session_state:
     st.session_state.users_df = google_db.read_sheet("users")
     # For initial login, recreate USERS dict from loaded data
     # In a real app, passwords should be hashed and salted!
-    global USERS
+    global USERS # Global declaration for the initial assignment at script load
     if "Username" in st.session_state.users_df.columns:
         USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
     else:
@@ -392,7 +391,6 @@ def send_email(recipient_email, subject, body):
     msg['To'] = recipient_email
 
     try:
-        # Uncomment this block for actual email sending
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             if enable_tls:
                 server.starttls()
@@ -545,6 +543,7 @@ def show_admin_dashboard():
 
 def show_user_management():
     """Admin User Management: Add/view/edit users."""
+    global USERS # Declare global variable at the beginning of the function
     st.title("👤 User Management")
     st.markdown("---")
     st.write("Manage system users, their roles, and basic profiles.")
@@ -574,7 +573,6 @@ def show_user_management():
             st.session_state.users_df = temp_users_df # Update the session state DataFrame
             google_db.save_dataframe("users", st.session_state.users_df) # Save to Google Sheet
             # Also update the global USERS dict for login
-            global USERS
             USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
             st.success("User details updated successfully! ✅")
             st.rerun()
@@ -617,7 +615,6 @@ def show_user_management():
                         st.session_state.volunteers_df = pd.concat([st.session_state.volunteers_df, pd.DataFrame([new_volunteer_profile])], ignore_index=True)
                         google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
 
-                    global USERS
                     USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index") # Update global dict
                     st.success(f"User '{new_username}' added with role '{new_role}'. ✅")
                     st.rerun() 
@@ -1375,6 +1372,7 @@ def show_my_tasks():
 
 def show_update_availability():
     """Volunteer: Manage their availability status."""
+    global USERS # Declare global variable at the beginning of the function
     st.title("📅 Update Availability")
     st.markdown("---")
     st.write(f"Manage your availability for volunteer assignments, {st.session_state.user_full_name}.")
@@ -1393,7 +1391,6 @@ def show_update_availability():
             st.session_state.users_df.loc[user_idx, "Availability"] = new_availability
             google_db.save_dataframe("users", st.session_state.users_df) # Save to Google Sheet
             # Also update the global USERS dict for login
-            global USERS
             USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
 
         # Update in `volunteers_df` (which is used for coordinator assignment)

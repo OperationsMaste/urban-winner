@@ -7,6 +7,9 @@ from email.mime.text import MIMEText
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import bcrypt
+import re
+from typing import Optional
 
 # --- Configuration ---
 st.set_page_config(layout="wide", page_title="Inter-College Festive Event ERP")
@@ -142,45 +145,39 @@ img {
 """
 st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 
-
 # --- Google Sheets Database Configuration ---
-# You NEED to set these in .streamlit/secrets.toml
-# [google_sheets]
-# service_account_key = """{...json content...}"""
 spreadsheet_name = "FestiveEventERP_DB"
 
-_gspread_enabled = True
-#_spreadsheet = None # _client is now only used locally within the try block
+@st.cache_resource
+def initialize_gspread_client():
+    """Initialize and cache Google Sheets client."""
+    try:
+        if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
+            creds_json = json.loads(st.secrets.google_sheets.service_account_key)
+            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
+            client = gspread.authorize(creds)
+            spreadsheet = client.open(spreadsheet_name)
+            return client, spreadsheet, True
+        else:
+            st.warning("Google Sheets secrets not found. Running with no persistent data.")
+            return None, None, False
+    except gspread.exceptions.GSpreadException as e:
+        st.error(f"Error initializing Google Sheets: {e}. Running with no persistent data.")
+        return None, None, False
 
-try:
-    if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
-        _creds_json = json.loads(st.secrets.google_sheets.service_account_key)
-        _scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        
-        _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
-        _client = gspread.authorize(_creds) # Local client instance
-        _spreadsheet = _client.open(spreadsheet_name) # Global spreadsheet object
-        _gspread_enabled = True
-        st.success("Google Sheets integration enabled. ✅")
-    else:
-        st.warning("Google Sheets secrets not found. Running with no persistent data. Please configure `secrets.toml` to enable data persistence.")
-except Exception as e:
-    st.error(f"Error initializing Google Sheets: {e}. Running with no persistent data.")
-    _gspread_enabled = True
+gspread_client, spreadsheet, gspread_enabled = initialize_gspread_client()
 
 class GoogleSheetDB:
     """
     A class to manage interactions with Google Sheets as a database.
     If gspread is not enabled, it returns empty DataFrames and does not save data.
     """
-    def __init__(self, spreadsheet_name, gspread_enabled=False):
+    def __init__(self, spreadsheet_name, gspread_enabled=False, spreadsheet=None):
         self._spreadsheet_name = spreadsheet_name
-        self._gspread_enabled = gspread_enabled # Current state of GSheets connectivity
+        self._gspread_enabled = gspread_enabled
+        self._spreadsheet = spreadsheet
 
-    # --- Implement __hash__ and __eq__ to make instances hashable for Streamlit's cache ---
-    # The hash reflects the state that affects the cached function's output.
-    # If _gspread_enabled changes (e.g., due to an error and fallback), the hash changes,
-    # invalidating previous cached results for this instance.
     def __hash__(self):
         return hash((self._spreadsheet_name, self._gspread_enabled))
 
@@ -189,17 +186,16 @@ class GoogleSheetDB:
             return NotImplemented
         return self._spreadsheet_name == other._spreadsheet_name and \
                self._gspread_enabled == other._gspread_enabled
-    # ----------------------------------------------------------------------------------
 
-    @st.cache_data(ttl=300) # Cache sheet data for 5 minutes
+    @st.cache_data(ttl=300)
     def _read_sheet_cached(_self, sheet_name): # Using _self to tell Streamlit not to hash this param
         """Helper to read a sheet with caching."""
         if _self._gspread_enabled:
             st.info(f"Attempting to load data for '{sheet_name}' from Google Sheets...")
             try:
-                if _spreadsheet is None: # Defensive check, should ideally be caught during init
+                if _self._spreadsheet is None: # Defensive check
                     raise ValueError("Google Sheets spreadsheet object not initialized.")
-                worksheet = _spreadsheet.worksheet(sheet_name)
+                worksheet = _self._spreadsheet.worksheet(sheet_name)
                 data = worksheet.get_all_records()
                 df = pd.DataFrame(data)
                 
@@ -208,6 +204,9 @@ class GoogleSheetDB:
                     if col in df.columns:
                         df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
                 return df
+            except gspread.exceptions.WorksheetNotFound as e:
+                st.error(f"Worksheet '{sheet_name}' not found: {e}")
+                return pd.DataFrame()
             except Exception as e:
                 st.error(f"Failed to read sheet '{sheet_name}' from Google Sheets: {e}")
                 st.warning(f"Data for '{sheet_name}' could not be loaded. Google Sheets disabled for this session. Returning empty data.")
@@ -228,9 +227,9 @@ class GoogleSheetDB:
         if self._gspread_enabled:
             st.info(f"Attempting to write data for '{sheet_name}' to Google Sheets...")
             try:
-                if _spreadsheet is None: # Defensive check
+                if self._spreadsheet is None: # Defensive check
                     raise ValueError("Google Sheets spreadsheet object not initialized.")
-                worksheet = _spreadsheet.worksheet(sheet_name)
+                worksheet = self._spreadsheet.worksheet(sheet_name)
                 worksheet.clear() # Clear existing content
                 # Convert datetime.date objects to string for gspread
                 df_to_write = df.copy()
@@ -242,7 +241,7 @@ class GoogleSheetDB:
             except Exception as e:
                 st.error(f"Failed to write sheet '{sheet_name}' to Google Sheets: {e}")
                 st.warning("Data could not be saved to Google Sheets. Google Sheets disabled for this session. Changes are not persistent.")
-                self._gspread_enabled = True # Mark as disabled for this instance
+                self._gspread_enabled = False # Mark as disabled for this instance
                 st.cache_data.clear() # Clear cache to ensure subsequent reads reflect the disabled state
                 st.rerun() # Rerun to reflect the new _gspread_enabled state
         else:
@@ -256,8 +255,9 @@ class GoogleSheetDB:
 
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
-    spreadsheet_name=spreadsheet_name if _gspread_enabled else "N/A", # Pass actual name if enabled    
-    gspread_enabled=_gspread_enabled
+    spreadsheet_name=spreadsheet_name if gspread_enabled else "N/A",    
+    gspread_enabled=gspread_enabled,
+    spreadsheet=spreadsheet
 )
 
 
@@ -272,34 +272,11 @@ if "logged_in" not in st.session_state:
 
 # Load initial data from Google Sheets (or empty DataFrames if Sheets are disabled)
 # These will be DataFrames, which are easy to work with in Streamlit
-if "users_df" not in st.session_state:
-    st.session_state.users_df = google_db.read_sheet("users")
-    
-    # For initial login, recreate USERS dict from loaded data
-    # In a real app, passwords should be hashed and salted!
-    global USERS 
-    if not st.session_state.users_df.empty and "Username" in st.session_state.users_df.columns:
-        USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
-    else:
-        USERS = {} # Fallback to empty dict if sheet is empty or malformed
-
-if "events_df" not in st.session_state:
-    st.session_state.events_df = google_db.read_sheet("events")
-
-if "registrations_df" not in st.session_state:
-    st.session_state.registrations_df = google_db.read_sheet("registrations")
-
-if "volunteers_df" not in st.session_state:
-    st.session_state.volunteers_df = google_db.read_sheet("volunteers")
-
-if "tasks_df" not in st.session_state:
-    st.session_state.tasks_df = google_db.read_sheet("tasks")
-
-if "announcements_df" not in st.session_state:
-    st.session_state.announcements_df = google_db.read_sheet("announcements")
-
-if "sponsors_df" not in st.session_state:
-    st.session_state.sponsors_df = google_db.read_sheet("sponsors")
+dataframes = ["users_df", "events_df", "registrations_df", "volunteers_df", "tasks_df", "announcements_df", "sponsors_df"]
+for df_name in dataframes:
+    if df_name not in st.session_state:
+        sheet_name = df_name.replace("_df", "s")
+        st.session_state[df_name] = google_db.read_sheet(sheet_name)
 
 
 # --- Role-based Page Mapping ---
@@ -318,11 +295,13 @@ def send_email(recipient_email, subject, body):
     Sends an email notification.
     Requires SMTP configuration in .streamlit/secrets.toml.
     """
-    if "smtp" not in st.secrets:
-        st.warning(f"Email configuration not found in secrets. Email to '{recipient_email}' not sent.")
+    if "smtp" not in st.secrets or not all(
+        key in st.secrets.smtp for key in ["email_sender", "email_password", "smtp_server", "smtp_port", "enable_tls"]
+    ):
+        st.warning(f"SMTP configuration incomplete. Email to '{recipient_email}' not sent.")
         print(f"--- MOCK EMAIL TO: {recipient_email} ---\nSubject: {subject}\n\n{body}\n--- END MOCK EMAIL ---")
         return
-    
+
     sender_email = st.secrets.smtp.email_sender
     sender_password = st.secrets.smtp.email_password
     smtp_server = st.secrets.smtp.smtp_server
@@ -359,23 +338,52 @@ def logout():
     st.success("You have been logged out. 👋")
     st.rerun() # Rerun to refresh the UI and show login form
 
-def login(username, password):
+def validate_input(value: str, field_name: str, max_length: int = 100, allow_special: bool = False) -> Optional[str]:
+    """Validate and sanitize input strings."""
+    if not value:
+        return None
+    if len(value) > max_length:
+        st.error(f"{field_name} is too long (max {max_length} characters).")
+        return None
+    pattern = r'^[a-zA-Z0-9\s]+$' if not allow_special else r'^[a-zA-Z0-9\s@._-]+$'
+    if not re.match(pattern, value):
+        st.error(f"{field_name} contains invalid characters.")
+        return None
+    return value
+
+def hash_password(password: str) -> bytes:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+
+def verify_password(password: str, hashed: bytes) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed)
+
+def login(username: str, password: str):
     """Authenticates the user and sets session state."""
-    # Check against the USERS dict derived from Google Sheet (or mock)
-    if username in USERS and USERS[username]["Password"] == password:
-        st.session_state.logged_in = True
-        st.session_state.username = username
-        st.session_state.role = USERS[username]["Role"]
-        st.session_state.user_full_name = USERS[username]["Name"]
-        
-        # Set the default page to the first accessible page for the role after login
-        accessible_pages_for_role = ROLE_PAGES.get(st.session_state.role, ["Home"])
-        st.session_state.current_page = accessible_pages_for_role[0] if accessible_pages_for_role else "Home"
-        
-        st.success(f"Welcome, {st.session_state.user_full_name} ({st.session_state.role})! 🎉")
-        st.rerun() # Rerun to refresh the UI and show role-specific navigation
+    # Validate inputs
+    if not validate_input(username, "Username") or not password:
+        st.error("Invalid username or password format 🚫")
+        return
+
+    # Check against the users_df (passwords are hashed)
+    users_df = st.session_state.users_df
+    if not users_df.empty and "Username" in users_df.columns:
+        user_row = users_df[users_df["Username"] == username]
+        if not user_row.empty and verify_password(password, user_row["Password"].iloc[0].encode('utf-8')):
+            st.session_state.logged_in = True
+            st.session_state.username = username
+            st.session_state.role = user_row["Role"].iloc[0]
+            st.session_state.user_full_name = user_row["Name"].iloc[0]
+            
+            # Set the default page to the first accessible page for the role after login
+            accessible_pages_for_role = ROLE_PAGES.get(st.session_state.role, ["Home"])
+            st.session_state.current_page = accessible_pages_for_role[0] if accessible_pages_for_role else "Home"
+            
+            st.success(f"Welcome, {st.session_state.user_full_name} ({st.session_state.role})! 🎉")
+            st.rerun() # Rerun to refresh the UI and show role-specific navigation
+        else:
+            st.error("Invalid username or password 🚫")
     else:
-        st.error("Invalid username or password 🚫")
+        st.error("No user data loaded or malformed. Please check configuration.")
 
 # --- Page Content Functions ---
 
@@ -388,8 +396,8 @@ def home_page():
     st.markdown("---")
     if not st.session_state.logged_in:
         st.info("Please log in using the sidebar to access specific functionalities based on your role.")
-        # If Google Sheets are disabled and USERS is empty, prevent login attempts
-        if not USERS:
+        # If Google Sheets are disabled and users_df is empty, prevent login attempts
+        if st.session_state.users_df.empty:
             st.warning("No user data loaded. Please ensure Google Sheets are correctly configured and accessible to enable login.")
         else:
             st.markdown("Try logging in with existing users from your Google Sheet.")
@@ -408,7 +416,7 @@ def show_announcements():
     relevant_announcements = st.session_state.announcements_df[
         (st.session_state.announcements_df["Target Role"] == "All") |
         (st.session_state.announcements_df["Target Role"] == current_role)
-    ].sort_values("Date Posted", ascending=False)
+    ].sort_values("Date Posted", ascending=False) if not st.session_state.announcements_df.empty else pd.DataFrame()
 
     if relevant_announcements.empty:
         st.info("No announcements available at the moment.")
@@ -433,7 +441,7 @@ def show_announcements():
                 submit_announcement = st.form_submit_button("Publish Announcement")
 
                 if submit_announcement:
-                    if announcement_title and announcement_content:
+                    if validate_input(announcement_title, "Title") and announcement_content:
                         new_announcement_id = f"A{len(st.session_state.announcements_df) + 1:03d}"
                         new_entry = {
                             "Announcement ID": new_announcement_id,
@@ -459,28 +467,28 @@ def show_admin_dashboard():
     with col1:
         st.metric("Total Events", st.session_state.events_df.shape[0])
     with col2:
-        st.metric("Total Participants", st.session_state.registrations_df["Participant Username"].nunique())
+        st.metric("Total Participants", st.session_state.registrations_df["Participant Username"].nunique() if "Participant Username" in st.session_state.registrations_df.columns else 0)
     with col3:
         st.metric("Total Volunteers", st.session_state.volunteers_df.shape[0])
     with col4:
-        st.metric("Total Budget Allocated", f"₹{st.session_state.events_df['Budget'].sum():,.2f}")
+        st.metric("Total Budget Allocated", f"₹{st.session_state.events_df['Budget'].sum() if 'Budget' in st.session_state.events_df.columns else 0:,.2f}")
 
     st.subheader("Upcoming Events 🗓️")
-    upcoming = st.session_state.events_df[st.session_state.events_df["Status"] == "Upcoming"].sort_values("Date")
+    upcoming = st.session_state.events_df[st.session_state.events_df["Status"] == "Upcoming"].sort_values("Date") if not st.session_state.events_df.empty else pd.DataFrame()
     if upcoming.empty:
         st.info("No upcoming events.")
     else:
         st.dataframe(upcoming.head(5), use_container_width=True)
 
     st.subheader("Recent Registrations 🧑‍🤝‍🧑")
-    recent_regs = st.session_state.registrations_df.sort_values("Registration Date", ascending=False).head(5)
+    recent_regs = st.session_state.registrations_df.sort_values("Registration Date", ascending=False).head(5) if not st.session_state.registrations_df.empty else pd.DataFrame()
     if recent_regs.empty:
         st.info("No recent registrations.")
     else:
         st.dataframe(recent_regs, use_container_width=True)
 
     st.subheader("Recent Announcements 📣")
-    recent_announcements = st.session_state.announcements_df.sort_values("Date Posted", ascending=False).head(3)
+    recent_announcements = st.session_state.announcements_df.sort_values("Date Posted", ascending=False).head(3) if not st.session_state.announcements_df.empty else pd.DataFrame()
     if recent_announcements.empty:
         st.info("No recent announcements.")
     else:
@@ -490,35 +498,33 @@ def show_admin_dashboard():
 
 def show_user_management():
     """Admin User Management: Add/view/edit users."""
-    global USERS # Declare global variable at the beginning of the function
     st.title("👤 User Management")
     st.markdown("---")
     st.write("Manage system users, their roles, and basic profiles.")
 
+    users_df = st.session_state.users_df
     st.subheader("Existing System Users")
     
-    if st.session_state.users_df.empty:
+    if users_df.empty or "Username" not in users_df.columns:
         st.info("No users in the system.")
     else:
         editable_users_df = st.data_editor(
-            st.session_state.users_df.drop(columns=["Password"]), # Don't show passwords
+            users_df.drop(columns=["Password"], errors='ignore'), # Don't show passwords
             key="users_editor", 
             use_container_width=True,
             column_config={
                 "Role": st.column_config.SelectboxColumn(options=["Admin", "Coordinator", "Participant", "Volunteer"]),
-                "Availability": st.column_config.SelectboxColumn(options=["Available", "Busy", "On Leave", "N/A"])
+                "Availability": st.column_config.SelectboxColumn(options=["Available", "Busy", "On Leave", "N/A"]),
+                "Email": st.column_config.TextColumn()
             }
         )
-        if not editable_users_df.equals(st.session_state.users_df.drop(columns=["Password"])):
-            # Reconstruct the users_df, preserving passwords (they are not edited via data_editor)
-            temp_users_df = st.session_state.users_df.copy()
+        if not editable_users_df.equals(users_df.drop(columns=["Password"], errors='ignore')):
+            temp_users_df = users_df.copy()
             for col in editable_users_df.columns:
                 if col in temp_users_df.columns:
                     temp_users_df[col] = editable_users_df[col]
             st.session_state.users_df = temp_users_df # Update the session state DataFrame
             google_db.save_dataframe("users", st.session_state.users_df) # Save to Google Sheet
-            # Also update the global USERS dict for login
-            USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
             st.success("User details updated successfully! ✅")
             st.rerun()
 
@@ -531,21 +537,28 @@ def show_user_management():
                 new_password = st.text_input("Password", type="password")
             with col2:
                 new_name = st.text_input("Full Name")
+                new_email = st.text_input("Email")
                 new_role = st.selectbox("Role", options=["Admin", "Coordinator", "Participant", "Volunteer"])
             
             submit_button = st.form_submit_button("Add User")
 
             if submit_button:
-                if new_username in st.session_state.users_df["Username"].values:
+                if not all([
+                    validate_input(new_username, "Username"),
+                    validate_input(new_name, "Full Name"),
+                    validate_input(new_email, "Email", allow_special=True),
+                    new_password
+                ]):
+                    st.error("Please correct the input fields.")
+                elif new_username in users_df["Username"].values:
                     st.error("Username already exists! Please choose a different one.")
-                elif not new_username or not new_password or not new_name:
-                    st.error("Please fill in all required fields.")
                 else:
                     new_user_entry = {
                         "Username": new_username, 
-                        "Password": new_password, # In real app, hash this!
+                        "Password": hash_password(new_password).decode('utf-8'), # Hash password
                         "Role": new_role, 
                         "Name": new_name,
+                        "Email": new_email,
                         "Availability": "Available" if new_role == "Volunteer" else "N/A" # Default for volunteers
                     }
                     st.session_state.users_df = pd.concat([st.session_state.users_df, pd.DataFrame([new_user_entry])], ignore_index=True)
@@ -560,7 +573,6 @@ def show_user_management():
                         st.session_state.volunteers_df = pd.concat([st.session_state.volunteers_df, pd.DataFrame([new_volunteer_profile])], ignore_index=True)
                         google_db.save_dataframe("volunteers", st.session_state.volunteers_df)
 
-                    USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index") # Update global dict
                     st.success(f"User '{new_username}' added with role '{new_role}'. ✅")
                     st.rerun() 
 
@@ -606,7 +618,7 @@ def show_event_management():
             with col2:
                 location = st.text_input("Location")
                 # Filter for actual coordinators from users_df, add an empty option
-                coordinator_names = st.session_state.users_df[st.session_state.users_df["Role"] == "Coordinator"]["Name"].tolist()
+                coordinator_names = st.session_state.users_df[st.session_state.users_df["Role"] == "Coordinator"]["Name"].tolist() if not st.session_state.users_df.empty else []
                 coordinator_options = [""] + coordinator_names
                 coordinator = st.selectbox("Coordinator", options=coordinator_options)
                 budget = st.number_input("Budget", min_value=0, value=10000, step=1000)
@@ -619,7 +631,7 @@ def show_event_management():
             if submit_event:
                 if event_id in st.session_state.events_df["Event ID"].values:
                     st.error("Event ID already exists! Please choose a unique ID.")
-                elif not event_id or not name or not location or not coordinator:
+                elif not event_id or not validate_input(name, "Event Name") or not location or not coordinator:
                     st.error("Please fill in all required fields (Event ID, Name, Location, Coordinator).")
                 else:
                     new_event = {
@@ -685,7 +697,7 @@ def show_sponsor_management():
             if submit_sponsor:
                 if sponsor_id in st.session_state.sponsors_df["Sponsor ID"].values:
                     st.error("Sponsor ID already exists! Please choose a unique ID.")
-                elif not sponsor_id or not name or not contact_person or not contact_email:
+                elif not sponsor_id or not validate_input(name, "Sponsor Name") or not validate_input(contact_person, "Contact Person") or not validate_input(contact_email, "Contact Email", allow_special=True):
                     st.error("Please fill in all required fields.")
                 else:
                     new_sponsor = {
@@ -708,8 +720,8 @@ def show_budget_overview():
     st.markdown("---")
     st.write("Monitor budget allocations and expenses across all events.")
 
-    total_allocated_budget = st.session_state.events_df["Budget"].sum()
-    total_sponsor_contributions = st.session_state.sponsors_df["Contribution Amount"].sum() if not st.session_state.sponsors_df.empty else 0
+    total_allocated_budget = st.session_state.events_df["Budget"].sum() if "Budget" in st.session_state.events_df.columns else 0
+    total_sponsor_contributions = st.session_state.sponsors_df["Contribution Amount"].sum() if "Contribution Amount" in st.session_state.sponsors_df.columns else 0
 
     col1, col2 = st.columns(2)
     with col1:
@@ -817,14 +829,13 @@ def show_reports():
             st.dataframe(st.session_state.sponsors_df[["Name", "Tier", "Contribution Amount", "Contact Person"]], use_container_width=True)
             st.bar_chart(st.session_state.sponsors_df.set_index("Name")["Contribution Amount"])
 
-
 def show_my_events():
     """Coordinator: View and manage events assigned to them."""
     st.title("My Events 🗓️")
     st.markdown("---")
     st.write(f"Events you are coordinating, {st.session_state.user_full_name}.")
     
-    my_events = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name]
+    my_events = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name] if not st.session_state.events_df.empty else pd.DataFrame()
     if my_events.empty:
         st.info("You are not currently assigned to coordinate any events.")
     else:
@@ -857,7 +868,7 @@ def show_event_task_management():
     st.markdown("---")
     st.write(f"Manage tasks for events you coordinate, {st.session_state.user_full_name}.")
 
-    my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name]
+    my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name] if not st.session_state.events_df.empty else pd.DataFrame()
 
     if my_events_df.empty:
         st.info("You are not coordinating any events to manage tasks for.")
@@ -872,7 +883,7 @@ def show_event_task_management():
         event_name = my_events_df[my_events_df["Event ID"] == selected_event_id]["Name"].iloc[0]
         st.subheader(f"Tasks for: {event_name} ({selected_event_id}) 📝")
 
-        current_event_tasks = st.session_state.tasks_df[st.session_state.tasks_df["Event ID"] == selected_event_id]
+        current_event_tasks = st.session_state.tasks_df[st.session_state.tasks_df["Event ID"] == selected_event_id] if not st.session_state.tasks_df.empty else pd.DataFrame()
         
         if current_event_tasks.empty:
             st.info("No tasks defined for this event yet.")
@@ -898,7 +909,7 @@ def show_event_task_management():
             with st.form(f"add_task_form_{selected_event_id}"):
                 task_description = st.text_input("Task Description")
                 # Get volunteer usernames from users_df with role "Volunteer"
-                volunteer_usernames = st.session_state.users_df[st.session_state.users_df["Role"] == "Volunteer"]["Username"].tolist()
+                volunteer_usernames = st.session_state.users_df[st.session_state.users_df["Role"] == "Volunteer"]["Username"].tolist() if not st.session_state.users_df.empty else []
                 volunteer_options = [""] + volunteer_usernames
                 assigned_to_volunteer = st.selectbox("Assign to Volunteer (Optional)", options=volunteer_options)
                 due_date = st.date_input("Due Date", datetime.date.today())
@@ -907,7 +918,7 @@ def show_event_task_management():
                 add_task_button = st.form_submit_button("Add Task")
 
                 if add_task_button:
-                    if task_description:
+                    if validate_input(task_description, "Task Description"):
                         new_task_id = f"T{len(st.session_state.tasks_df) + 1:03d}"
                         new_task = {
                             "Task ID": new_task_id,
@@ -923,15 +934,15 @@ def show_event_task_management():
                         st.success(f"Task '{task_description}' added to '{event_name}'! ✅")
 
                         if assigned_to_volunteer:
-                            volunteer_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_to_volunteer]
-                            if not volunteer_email_row.empty:
-                                dummy_volunteer_email = f"{assigned_to_volunteer}@example.com" 
+                            volunteer_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_to_volunteer]
+                            if not volunteer_row.empty and "Email" in volunteer_row.columns:
+                                dummy_volunteer_email = volunteer_row["Email"].iloc[0] 
                                 email_subject = f"New Task Assignment for {event_name}"
-                                email_body = f"Hello {USERS[assigned_to_volunteer]['Name']},\n\nYou have been assigned a new task for '{event_name}':\n\nTask: {task_description}\nDue Date: {due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
+                                email_body = f"Hello {volunteer_row['Name'].iloc[0]},\n\nYou have been assigned a new task for '{event_name}':\n\nTask: {task_description}\nDue Date: {due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
                                 send_email(dummy_volunteer_email, email_subject, email_body)
                         st.rerun()
                     else:
-                        st.error("Task description cannot be empty.")
+                        st.error("Task description cannot be empty or invalid.")
 
 def show_volunteer_assignment():
     """Coordinator: Assign volunteers to tasks within their events."""
@@ -939,7 +950,7 @@ def show_volunteer_assignment():
     st.markdown("---")
     st.write(f"Assign volunteers to tasks for events you coordinate, {st.session_state.user_full_name}.")
 
-    my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name]
+    my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name] if not st.session_state.events_df.empty else pd.DataFrame()
 
     if my_events_df.empty:
         st.info("You are not coordinating any events to assign volunteers to.")
@@ -952,14 +963,14 @@ def show_volunteer_assignment():
     if selected_event_id:
         st.subheader(f"Volunteers and Tasks for {my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]}")
         
-        current_event_tasks = st.session_state.tasks_df[st.session_state.tasks_df["Event ID"] == selected_event_id]
+        current_event_tasks = st.session_state.tasks_df[st.session_state.tasks_df["Event ID"] == selected_event_id] if not st.session_state.tasks_df.empty else pd.DataFrame()
         
         if current_event_tasks.empty:
             st.info("No tasks defined for this event yet. Please create tasks in 'Event Task Management' first.")
         else:
             # Display current assignments
             display_tasks = pd.merge(current_event_tasks, st.session_state.volunteers_df[["Volunteer Username", "Full Name", "Availability"]],
-                                     left_on="Assigned To Volunteer Username", right_on="Volunteer Username", how="left").fillna({"Full Name": "Unassigned", "Availability": "N/A"})
+                                     left_on="Assigned To Volunteer Username", right_on="Volunteer Username", how="left").fillna({"Full Name": "Unassigned", "Availability": "N/A"}) if not st.session_state.volunteers_df.empty else current_event_tasks
             st.dataframe(display_tasks[["Description", "Full Name", "Availability", "Status", "Due Date"]], use_container_width=True)
 
             st.subheader("Assign/Reassign Task to Volunteer ✏️")
@@ -968,7 +979,7 @@ def show_volunteer_assignment():
                     task_options = [""] + current_event_tasks["Description"].tolist()
                     selected_task_description = st.selectbox("Select Task", options=task_options)
                     
-                    available_volunteers_df = st.session_state.volunteers_df[st.session_state.volunteers_df["Availability"] == "Available"]
+                    available_volunteers_df = st.session_state.volunteers_df[st.session_state.volunteers_df["Availability"] == "Available"] if not st.session_state.volunteers_df.empty else pd.DataFrame()
                     volunteer_options = [""] + available_volunteers_df["Volunteer Username"].tolist()
                     
                     assigned_volunteer = st.selectbox("Assign To (Available Volunteers)", options=volunteer_options, help="Only 'Available' volunteers are shown.")
@@ -993,13 +1004,13 @@ def show_volunteer_assignment():
                                     
                                     # Send email notification to the assigned volunteer
                                     volunteer_user_row = st.session_state.users_df[st.session_state.users_df["Username"] == assigned_volunteer]
-                                    if not volunteer_user_row.empty:
-                                        dummy_volunteer_email = f"{assigned_volunteer}@example.com"
+                                    if not volunteer_user_row.empty and "Email" in volunteer_user_row.columns:
+                                        email = volunteer_user_row["Email"].iloc[0]
                                         event_full_name = my_events_df[my_events_df['Event ID'] == selected_event_id]['Name'].iloc[0]
                                         email_subject = f"Your Task Assignment for {event_full_name}"
                                         task_due_date = st.session_state.tasks_df.loc[task_idx, 'Due Date'].iloc[0]
-                                        email_body = f"Hello {USERS[assigned_volunteer]['Name']},\n\nYou have been assigned a task for '{event_full_name}':\n\nTask: {selected_task_description}\nDue Date: {task_due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
-                                        send_email(dummy_volunteer_email, email_subject, email_body)
+                                        email_body = f"Hello {volunteer_user_row['Name'].iloc[0]},\n\nYou have been assigned a task for '{event_full_name}':\n\nTask: {selected_task_description}\nDue Date: {task_due_date}\n\nPlease check the ERP system for more details.\n\nRegards,\n{st.session_state.user_full_name} (Coordinator)"
+                                        send_email(email, email_subject, email_body)
                                 else: # Unassign
                                     st.session_state.tasks_df.loc[task_idx, "Assigned To Volunteer Username"] = None
                                     st.session_state.tasks_df.loc[task_idx, "Status"] = "Pending" # Update status to Pending
@@ -1018,7 +1029,7 @@ def show_event_budget_tracking():
     st.markdown("---")
     st.write(f"Track the budget for events you coordinate, {st.session_state.user_full_name}.")
 
-    my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name]
+    my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name] if not st.session_state.events_df.empty else pd.DataFrame()
     
     if my_events_df.empty:
         st.info("You are not coordinating any events to track budget for.")
@@ -1067,7 +1078,7 @@ def show_event_budget_tracking():
                 expense_date = st.date_input("Date", datetime.date.today())
                 add_expense_button = st.form_submit_button("Add Expense (Conceptual)")
                 if add_expense_button:
-                    if expense_category and expense_amount > 0:
+                    if validate_input(expense_category, "Expense Category") and expense_amount > 0:
                         st.info(f"Conceptual Expense Added: Event '{event_info['Name']}' - {expense_category} - ₹{expense_amount} on {expense_date}. (This entry is not saved persistently.)")
                     else:
                         st.error("Please provide a category and a positive amount for the conceptual expense.")
@@ -1083,7 +1094,7 @@ def show_communication_hub():
     coordinator_relevant_announcements = st.session_state.announcements_df[
         (st.session_state.announcements_df["Target Role"] == "All") |
         (st.session_state.announcements_df["Target Role"] == "Coordinator")
-    ].sort_values("Date Posted", ascending=False)
+    ].sort_values("Date Posted", ascending=False) if not st.session_state.announcements_df.empty else pd.DataFrame()
     
     if coordinator_relevant_announcements.empty:
         st.info("No relevant announcements for you.")
@@ -1098,7 +1109,7 @@ def show_communication_hub():
     st.info("This is a conceptual message sending feature. In a real system, this would integrate with email/notification services.")
     with st.expander("Send a Message"):
         with st.form("send_message_form"):
-            my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name]
+            my_events_df = st.session_state.events_df[st.session_state.events_df["Coordinator"] == st.session_state.user_full_name] if not st.session_state.events_df.empty else pd.DataFrame()
             event_options = [""] + my_events_df["Event ID"].tolist()
             target_event_id = st.selectbox("Select Event (Optional, for event-specific message)", options=event_options,
                                            format_func=lambda x: my_events_df[my_events_df["Event ID"] == x]["Name"].iloc[0] if x else "General")
@@ -1109,7 +1120,7 @@ def show_communication_hub():
             send_button = st.form_submit_button("Send Message (Conceptual)")
 
             if send_button:
-                if message_subject and message_content:
+                if validate_input(message_subject, "Subject") and message_content:
                     target_display = f"for Event '{my_events_df[my_events_df['Event ID'] == target_event_id]['Name'].iloc[0]}'" if target_event_id else "General Audience"
                     st.success(f"Conceptual Message Sent: Subject '{message_subject}' to {target_display}. (Not persistently saved or sent.)")
                 else:
@@ -1130,7 +1141,7 @@ def show_view_event_details():
         filtered_events = filtered_events[
             filtered_events["Name"].str.contains(search_query, case=False, na=False) |
             filtered_events["Location"].str.contains(search_query, case=False, na=False)
-        ]
+        ] if not filtered_events.empty else pd.DataFrame()
 
     if filtered_events.empty:
         st.info("No events found matching your search criteria.")
@@ -1188,7 +1199,7 @@ def show_register_for_events():
     st.subheader("Available Upcoming Events")
     search_query = st.text_input("Search events by Name or Location", key="register_event_search")
     
-    upcoming_events = st.session_state.events_df[st.session_state.events_df["Status"] == "Upcoming"]
+    upcoming_events = st.session_state.events_df[st.session_state.events_df["Status"] == "Upcoming"] if not st.session_state.events_df.empty else pd.DataFrame()
     
     if search_query:
         upcoming_events = upcoming_events[
@@ -1235,13 +1246,13 @@ def show_register_for_events():
 
                         # Send email notification to participant
                         participant_email_row = st.session_state.users_df[st.session_state.users_df["Username"] == st.session_state.username]
-                        if not participant_email_row.empty:
-                            dummy_participant_email = f"{st.session_state.username}@example.com"
+                        if not participant_email_row.empty and "Email" in participant_email_row.columns:
+                            participant_email = participant_email_row["Email"].iloc[0]
                             event_date = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Date'].iloc[0]
                             event_location = upcoming_events[upcoming_events['Event ID'] == event_to_register_id]['Location'].iloc[0]
                             email_subject = f"Registration Confirmation for {event_name}"
                             email_body = f"Hello {st.session_state.user_full_name},\n\nThis is to confirm your registration for '{event_name}'.\n\nEvent Date: {event_date}\nEvent Location: {event_location}\n\nWe look forward to seeing you there!\n\nRegards,\nFestive Event Team"
-                            send_email(dummy_participant_email, email_subject, email_body)
+                            send_email(participant_email, email_subject, email_body)
                         st.rerun()
                 else:
                     st.error("Please select an event to register.")
@@ -1252,14 +1263,14 @@ def show_my_registrations():
     st.markdown("---")
     st.write(f"Events you have registered for, {st.session_state.user_full_name}.")
 
-    my_regs = st.session_state.registrations_df[st.session_state.registrations_df["Participant Username"] == st.session_state.username]
+    my_regs = st.session_state.registrations_df[st.session_state.registrations_df["Participant Username"] == st.session_state.username] if not st.session_state.registrations_df.empty else pd.DataFrame()
     
     if my_regs.empty:
         st.info("You haven't registered for any events yet.")
         return
 
     # Merge with event details for better display
-    display_regs = pd.merge(my_regs, st.session_state.events_df[["Event ID", "Name", "Date", "Location", "Status"]], on="Event ID", how="left")
+    display_regs = pd.merge(my_regs, st.session_state.events_df[["Event ID", "Name", "Date", "Location", "Status"]], on="Event ID", how="left") if not st.session_state.events_df.empty else my_regs
     st.subheader("Your Registered Events")
     st.dataframe(display_regs[["Name", "Date", "Location", "Status", "Registration Date"]], use_container_width=True)
 
@@ -1300,14 +1311,14 @@ def show_my_tasks():
     st.markdown("---")
     st.write(f"Tasks assigned to you as a volunteer, {st.session_state.user_full_name}.")
 
-    my_tasks = st.session_state.tasks_df[st.session_state.tasks_df["Assigned To Volunteer Username"] == st.session_state.username]
+    my_tasks = st.session_state.tasks_df[st.session_state.tasks_df["Assigned To Volunteer Username"] == st.session_state.username] if not st.session_state.tasks_df.empty else pd.DataFrame()
 
     if my_tasks.empty:
         st.info("You currently have no tasks assigned.")
         return
 
     # Merge with event details for better display
-    display_tasks = pd.merge(my_tasks, st.session_state.events_df[["Event ID", "Name", "Date", "Location"]], on="Event ID", how="left")
+    display_tasks = pd.merge(my_tasks, st.session_state.events_df[["Event ID", "Name", "Date", "Location"]], on="Event ID", how="left") if not st.session_state.events_df.empty else my_tasks
     st.subheader("Your Assigned Tasks")
     st.dataframe(display_tasks[["Name", "Date", "Location", "Description", "Due Date", "Status"]], use_container_width=True)
 
@@ -1345,12 +1356,12 @@ def show_my_tasks():
 
 def show_update_availability():
     """Volunteer: Manage their availability status."""
-    global USERS # Declare global variable at the beginning of the function
     st.title("📅 Update Availability")
     st.markdown("---")
     st.write(f"Manage your availability for volunteer assignments, {st.session_state.user_full_name}.")
 
-    current_availability = USERS[st.session_state.username].get("Availability", "Available")
+    users_df = st.session_state.users_df
+    current_availability = users_df[users_df["Username"] == st.session_state.username]["Availability"].iloc[0] if not users_df.empty and "Availability" in users_df.columns else "Available"
     
     st.subheader("Current Availability Status")
     st.info(f"Your current availability is: **{current_availability}**")
@@ -1359,15 +1370,13 @@ def show_update_availability():
     
     if st.button("Save Availability", key="save_availability_btn"):
         # Update in the users_df
-        user_idx = st.session_state.users_df[st.session_state.users_df["Username"] == st.session_state.username].index
+        user_idx = users_df[users_df["Username"] == st.session_state.username].index
         if not user_idx.empty:
             st.session_state.users_df.loc[user_idx, "Availability"] = new_availability
             google_db.save_dataframe("users", st.session_state.users_df) # Save to Google Sheet
-            # Also update the global USERS dict for login
-            USERS = st.session_state.users_df.set_index("Username").to_dict(orient="index")
 
         # Update in `volunteers_df` (which is used for coordinator assignment)
-        volunteer_idx = st.session_state.volunteers_df[st.session_state.volunteers_df["Volunteer Username"] == st.session_state.username].index
+        volunteer_idx = st.session_state.volunteers_df[st.session_state.volunteers_df["Volunteer Username"] == st.session_state.username].index if not st.session_state.volunteers_df.empty else pd.Index([])
         if not volunteer_idx.empty:
             st.session_state.volunteers_df.loc[volunteer_idx, "Availability"] = new_availability
             google_db.save_dataframe("volunteers", st.session_state.volunteers_df) # Save to Google Sheet
@@ -1396,8 +1405,8 @@ if not st.session_state.logged_in:
     with st.sidebar.form("login_form"):
         username = st.text_input("Username", key="login_username_input")
         password = st.text_input("Password", type="password", key="login_password_input")
-        # Only allow login attempts if there are actually users loaded from Sheets (or mock data if enabled)
-        login_disabled = not bool(USERS)
+        # Only allow login attempts if there are actually users loaded from Sheets (or mock)
+        login_disabled = st.session_state.users_df.empty
         login_button = st.form_submit_button("Login", disabled=login_disabled)
         if login_button:
             login(username, password)

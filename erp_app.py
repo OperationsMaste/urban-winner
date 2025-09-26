@@ -256,7 +256,7 @@ class GoogleSheetDB:
 
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
-    spreadsheet_name="FestiveEventERP_DB"
+    spreadsheet_name= "FestiveEventERP_DB"
     gspread_enabled=_gspread_enabled
 )
 

@@ -147,7 +147,7 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 # You NEED to set these in .streamlit/secrets.toml
 # [google_sheets]
 # service_account_key = """{...json content...}"""
-# spreadsheet_name = "FestiveEventERP_DB"
+spreadsheet_name = "FestiveEventERP_DB"
 
 _gspread_enabled = True
 _spreadsheet = None # _client is now only used locally within the try block
@@ -159,7 +159,7 @@ try:
         
         _creds = ServiceAccountCredentials.from_json_keyfile_dict(_creds_json, _scope)
         _client = gspread.authorize(_creds) # Local client instance
-        _spreadsheet = _client.open(st.secrets.google_sheets.spreadsheet_name) # Global spreadsheet object
+        _spreadsheet = _client.open(spreadsheet_name) # Global spreadsheet object
         _gspread_enabled = True
         st.success("Google Sheets integration enabled. ✅")
     else:
@@ -256,7 +256,7 @@ class GoogleSheetDB:
 
 # Initialize Google Sheet DB client
 google_db = GoogleSheetDB(
-    spreadsheet_name=st.secrets.google_sheets.spreadsheet_name if _gspread_enabled else "N/A", # Pass actual name if enabled    
+    spreadsheet_name=spreadsheet_name if _gspread_enabled else "N/A", # Pass actual name if enabled    
     gspread_enabled=_gspread_enabled
 )
 

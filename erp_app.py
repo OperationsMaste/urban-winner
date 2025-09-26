@@ -150,7 +150,7 @@ st.markdown(GLASSMORPHISM_CSS, unsafe_allow_html=True)
 spreadsheet_name = "FestiveEventERP_DB"
 
 _gspread_enabled = True
-_spreadsheet = None # _client is now only used locally within the try block
+#_spreadsheet = None # _client is now only used locally within the try block
 
 try:
     if "google_sheets" in st.secrets and "service_account_key" in st.secrets.google_sheets:
